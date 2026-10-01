@@ -103,6 +103,11 @@ run "$HERE/shims-makemkv:$BASE_PATH" --silent --no-online --title "Mon film" --y
 check "Fichier final déjà présent : arrêt immédiat (code 0)" 0 "$RC" "$OUT" "existe déjà"
 
 echo "== Délégation 3D (encbd3d.sh remplacé par un témoin)"
+# Un ancien rip sans piste MVC (une seule vidéo) doit être détecté et refait.
+OLD="$DEST/Mon film.encbd/rip"; mkdir -p "$OLD"
+ffmpeg -hide_banner -loglevel error -nostdin -f lavfi -i testsrc=size=320x240:rate=25:duration=2 \
+  -c:v libx264 -preset ultrafast "$OLD/Film_t01.mkv"; touch "$OLD/.complete"
+mkdir -p "$HOME/.MakeMKV"; printf 'app_Key = "T-cle-de-test"\napp_DefaultSelectionString = "-sel:all,-sel:mvcvideo"\n' > "$HOME/.MakeMKV/settings.conf"
 cat > "$TMP/encbd3d-temoin.sh" <<'W'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$TEMOIN_ARGS"
@@ -118,6 +123,10 @@ if [[ "$RC" -eq 0 && -s "$DEST/Mon film.tab.mkv" && "$args" == *"--output-stem $
       && "$args" == *"--silent"* && "$args" == *"--lang fra"* && "$args" == *"--no-settings-prompt"* \
       && "$args" == *".mkv --config"* ]]; then
   ok "3D : encbd3d.sh reçoit le MKV ripé, --output-stem, --silent, --lang"
+  if [[ "$OUT" == *"ne contient pas l'œil droit"*"nouveau rip"* ]]; then ok "3D : ancien rip sans piste MVC détecté et refait"; else ko "3D : ancien rip sans MVC non détecté" "$OUT"; fi
+  if grep -q 'app_DefaultSelectionString = "-sel:all,-sel:mvcvideo"' "$HOME/.MakeMKV/settings.conf" && grep -q 'T-cle-de-test' "$HOME/.MakeMKV/settings.conf"; then
+    ok "MakeMKV : règle de sélection forcée via une copie, settings.conf d'origine intact"
+  else ko "MakeMKV : settings.conf d'origine modifié"; fi
 else
   ko "3D : délégation (code $RC) args=[$args]" "$OUT"
 fi
@@ -147,6 +156,36 @@ fi
 echo "== encbd3d.sh"
 OUT="$(bash "$ROOT/encbd3d.sh" --help 2>&1)"; RC=$?
 check "encbd3d.sh --help (bibliothèque chargée)" 0 "$RC" "$OUT" "--output-stem" "encbd.conf"
+
+# MKV « MakeMKV » : vidéo + une seule piste audio 5.1 + sous-titres (pas de stéréo).
+ffmpeg -hide_banner -loglevel error -nostdin -f lavfi -i testsrc=size=320x240:rate=24000/1001:duration=4 \
+  -f lavfi -i sine=frequency=220:duration=4 -i "$HERE/shims-makemkv/sub.srt" \
+  -filter_complex "[1:a]pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0[a6]" -map 0:v -map "[a6]" -map 2:s \
+  -c:v libx264 -preset ultrafast -c:a ac3 -c:s srt "$TMP/film3d.mkv"
+run3d() { OUT="$(PATH="$BASE_PATH" VSPIPE_BIN="$HERE/shims/vspipe" MVC_SOURCE_PLUGIN=/dev/null \
+  bash "$ROOT/encbd3d.sh" --config "$CONF" --silent "$@" 2>&1)"; RC=$?; }
+
+run3d "$TMP/film3d.mkv" --output "$TMP/film-2d.tab.mkv"
+check "encbd3d.sh : MKV sans vue MVC refusé (code 4), sans tsMuxeR" 4 "$RC" "$OUT" "ne contient pas de vue MVC" "Mpeg4-MVC-3D"
+
+rm -rf "$TMP/film3d.encbd3d"   # dossier de travail laissé par l'échec précédent
+FAKE_MVC=1 run3d "$TMP/film3d.mkv" --title "Film 3D" --output "$TMP/film.tab.mkv"
+OUT_COMBINED="$OUT"; RC_COMBINED="$RC"
+ffmpeg -hide_banner -loglevel error -nostdin -i "$TMP/film3d.mkv" -map 0:v -map 0:v -map 0:a -map 0:s -c copy "$TMP/deux-vues.mkv"
+FAKE_MVC=1 run3d "$TMP/deux-vues.mkv" --output "$TMP/deux-vues.tab.mkv"
+check "encbd3d.sh : MKV à deux pistes vidéo (MakeMKV) → vues gauche et droite séparées" 0 "$RC" "$OUT" \
+  "Extraction des vues gauche (piste 0) et droite (piste 1)"
+OUT="$OUT_COMBINED"; RC="$RC_COMBINED"
+if [[ "$RC" -eq 0 && -s "$TMP/film.tab.mkv" ]]; then
+  streams="$(ffprobe -v error -show_entries stream=codec_type,channels -of csv=p=0 "$TMP/film.tab.mkv" | tr '\n' ' ')"
+  if [[ "$streams" == "video audio,6 subtitle"* && "$OUT" == *"pistes à 6 canaux conservées"* && "$OUT" != *tsMuxeR* ]]; then
+    ok "encbd3d.sh : MKV MVC traité sans tsMuxeR, audio 5.1 gardé faute de stéréo, sous-titres repris"
+  else
+    ko "encbd3d.sh : pistes inattendues : $streams" "$OUT"
+  fi
+else
+  ko "encbd3d.sh : MKV MVC (code $RC)" "$OUT"
+fi
 
 echo
 echo "Résultat : $PASS réussi(s), $FAIL échec(s)"

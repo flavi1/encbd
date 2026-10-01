@@ -4,6 +4,8 @@
 """Faux mkvmerge (sous-ensemble utilisé par encbd.sh) bâti sur ffprobe/ffmpeg."""
 import json, subprocess, sys
 a = sys.argv[1:]
+if len(a) == 1 and a[0].startswith("@"):
+    a = json.load(open(a[0][1:]))
 if a and a[0] == "-J":
     p = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_streams", "-of", "json", a[1]]))
     kinds = {"video": "video", "audio": "audio", "subtitle": "subtitles"}
@@ -26,7 +28,8 @@ while i < len(a):
     x = a[i]
     if x == "-o": out = a[i + 1]; i += 2; continue
     if x in ("--title", "--track-name", "--language", "--default-track", "--default-duration", "--display-dimensions",
-             "--audio-tracks", "--subtitle-tracks"):
+             "--audio-tracks", "--subtitle-tracks", "--stereo-mode", "--aspect-ratio", "--compression",
+             "--chapter-language", "--chapters", "--forced-track", "--engage"):
         cur[x] = a[i + 1]; i += 2; continue
     if x.startswith("--"):
         cur[x] = True; i += 1; continue

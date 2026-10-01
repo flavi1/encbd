@@ -32,13 +32,18 @@ R
   mkv)
     out="${args[$((i+3))]}"
     echo "PRGV:0,0,65536"
+    # Piste MVC (2e vidéo) seulement si la règle de sélection la demande, comme MakeMKV.
+    mvc=()
+    if grep -qs '^app_DefaultSelectionString = "+sel:all"' "$HOME/.MakeMKV/settings.conf"; then
+      mvc=(-map 0:v)
+    fi
     ffmpeg -hide_banner -loglevel error -nostdin \
       -f lavfi -i testsrc=size=320x240:rate=25:duration=4 \
       -f lavfi -i sine=frequency=440:duration=4 \
       -f lavfi -i "sine=frequency=220:duration=4" \
       -i "$(dirname "$0")/sub.srt" \
       -filter_complex "[2:a]pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0[a6]" \
-      -map 0:v -map 1:a -map "[a6]" -map 3:s \
+      -map 0:v "${mvc[@]}" -map 1:a -map "[a6]" -map 3:s \
       -c:v libx264 -preset ultrafast -c:a ac3 -c:s srt \
       -metadata:s:a:0 language=fre -metadata:s:a:1 language=eng -metadata:s:s:0 language=fre \
       "$out/Film_t01.mkv" || exit 1

@@ -249,6 +249,57 @@ def mkv_video(json_file):
     return 1
 
 
+def mkv_video_id(json_file):
+    """Identifiant de la première piste vidéo H.264 (ou MVC)."""
+    with open(json_file, "r", encoding="utf-8") as f:
+        info = json.load(f)
+    for t in info.get("tracks", []):
+        cid = t.get("properties", {}).get("codec_id", "")
+        if t.get("type") == "video" and cid.startswith("V_MPEG4/ISO/"):
+            out(t.get("id"))
+            return 0
+    return 1
+
+
+def mkv_video_ids(json_file):
+    with open(json_file, "r", encoding="utf-8") as f:
+        info = json.load(f)
+    return [t.get("id") for t in info.get("tracks", [])
+            if t.get("type") == "video" and t.get("properties", {}).get("codec_id", "").startswith("V_MPEG4/ISO/")]
+
+
+def fps_from_ns(ns):
+    """Durée d'image en ns → « num den » (24000/1001, 25/1…)."""
+    ns = float(ns)
+    if ns <= 0:
+        return 1
+    fps = 1e9 / ns
+    num = round(fps * 1001)
+    if num % 1000 == 0 and abs(num / 1001 - fps) < 0.002:
+        out(num, 1001)              # 23,976 · 29,97 · 59,94
+    elif abs(round(fps) - fps) < 0.002:
+        out(round(fps), 1)          # 24 · 25 · 50
+    else:
+        out(round(fps * 1000), 1000)
+    return 0
+
+
+def has_mvc(path, limit=64 * 1024 * 1024):
+    """Vrai si le flux Annex B contient des NAL MVC (type 20 ; 15 = subset SPS)."""
+    seen = set()
+    with open(path, "rb") as f:
+        data = f.read(limit)
+    i = data.find(b"\x00\x00\x01")
+    while i != -1 and i + 3 < len(data):
+        nal = data[i + 3] & 0x1F
+        if nal in (15, 20):
+            seen.add(nal)
+            if 20 in seen:
+                return True
+        i = data.find(b"\x00\x00\x01", i + 3)
+    return False
+
+
 # ─── TheDiscDB ───────────────────────────────────────────────────────────────
 def disc_files(mount, kind):
     if kind == "dvd":
@@ -379,6 +430,19 @@ def main(argv):
         return mkv_tracks(args[0])
     if cmd == "mkv-video":
         return mkv_video(args[0])
+    if cmd == "mkv-video-count":
+        out(len(mkv_video_ids(args[0])))
+        return 0
+    if cmd == "mkv-video-ids":
+        ids = mkv_video_ids(args[0])
+        out(*ids)
+        return 0 if ids else 1
+    if cmd == "mkv-video-id":
+        return mkv_video_id(args[0])
+    if cmd == "fps-from-ns":
+        return fps_from_ns(args[0])
+    if cmd == "has-mvc":
+        return 0 if has_mvc(args[0]) else 1
     if cmd == "discdb":
         return discdb_lookup(args[0], args[1])
     if cmd == "tmdb":

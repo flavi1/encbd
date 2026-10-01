@@ -111,11 +111,13 @@ Outils de l'hôte utilisés sans être embarqués : `udisksctl`, `findmnt`, `blk
 
 | Fichier | Rôle |
 | --- | --- |
-| `~/.MakeMKV/settings.conf` | clé MakeMKV : ligne `app_Key = "T-…"`. C'est la seule source de vérité ; encbd ne la copie pas. |
+| `~/.MakeMKV/settings.conf` | clé MakeMKV : ligne `app_Key = "T-…"`. C'est la seule source de vérité, jamais modifiée. |
 | `~/.config/aacs/KEYDB.cfg` | clés des Blu-ray pour le repli libaacs |
 | `~/.dvdcss/` | cache des clés DVD (créé par libdvdcss) |
 
 L'AppImage ne modifie ni `HOME` ni `XDG_CONFIG_HOME` : ces fichiers sont lus à leur emplacement habituel. Si la clé MakeMKV est absente ou expirée, encbd s'arrête avec le code 5 et indique la ligne à corriger.
+
+**Sélection des pistes MakeMKV.** La règle par défaut de MakeMKV écarte la piste « Mpeg4-MVC-3D » (l'œil droit) et les langues non préférées. makemkvcon n'ayant pas d'option pour la changer, encbd le lance avec un dossier personnel temporaire : son `.MakeMKV` reprend par liens tous vos fichiers, sauf `settings.conf`, copié avec la règle `MAKEMKV_SELECTION` à la place de la vôtre. Votre `settings.conf` n'est pas touché. Un rip 3D sans œil droit (par exemple fait avant cette correction) est détecté et refait automatiquement.
 
 ## Configuration
 
@@ -125,6 +127,7 @@ Le fichier `~/.config/encbd.conf` est partagé par `encbd.sh` et `encbd3d.sh`. I
 | --- | --- | --- |
 | `RIP_BACKEND` | `auto` | `auto` = MakeMKV s'il est installé, sinon libaacs / libdvdcss |
 | `MAKEMKVCON_BIN` | vide | chemin de makemkvcon (vide = recherche dans le PATH) |
+| `MAKEMKV_SELECTION` | `+sel:all` | règle de sélection des pistes imposée à MakeMKV ; vide = celle de `settings.conf` |
 | `NAME_TEMPLATE` | `{title} ({year})` | nom du fichier ; un `()` vide est retiré |
 | `ONLINE_LOOKUP` | `true` | TheDiscDB, TMDb, MusicBrainz |
 | `TMDB_API_KEY` | vide | clé TMDb personnelle (v3 ou jeton v4) ; vide = TMDb ignoré |

@@ -85,6 +85,11 @@ WAVPACK_BIN="wavpack"
 # auto    : MakeMKV s'il est installé, sinon libaacs (Blu-ray) / libdvdcss (DVD)
 # makemkv : MakeMKV uniquement      libaacs : libaacs / libdvdcss uniquement
 RIP_BACKEND="auto"
+# Règle de sélection des pistes imposée à MakeMKV (copie temporaire de settings.conf ;
+# l'original n'est jamais modifié). « +sel:all » garde tout, y compris la piste MVC 3D,
+# que la règle par défaut de MakeMKV exclut ; le tri se fait ensuite (--lang, canaux).
+# Vide = règle de settings.conf.
+MAKEMKV_SELECTION="+sel:all"
 
 # ── Nommage (destination = dossier) ───────────────────────────────────────
 # Variables : {title} {year}. Un « () » vide est retiré quand l'année est inconnue.
@@ -142,6 +147,7 @@ encbd_apply_defaults() {
   : "${SACD_EXTRACT_BIN:=sacd_extract}"
   : "${WAVPACK_BIN:=wavpack}"
   : "${RIP_BACKEND:=auto}"
+  : "${MAKEMKV_SELECTION=+sel:all}"
   [[ -n "${NAME_TEMPLATE:-}" ]] || NAME_TEMPLATE='{title} ({year})'
   : "${ONLINE_LOOKUP:=true}"
   : "${TMDB_API_KEY:=}"
@@ -262,6 +268,8 @@ pick_many() {   # <invite> <lignes id|codec|lang|desc...>
 # stdin : lignes id|codec|lang|desc ; ne garde que les pistes ayant au plus
 # AUDIO_MAX_CHANNELS canaux (0 = pas de limite). "5.1" = 6 canaux, "7.1" = 8.
 # Une piste dont le nombre de canaux est inconnu est conservée.
+# Si AUCUNE piste ne respecte la limite (Blu-ray sans piste stéréo, très courant), on garde
+# la ou les pistes ayant le moins de canaux plutôt que de produire un film muet.
 filter_channels() {
   if [[ "$AUDIO_MAX_CHANNELS" -le 0 ]]; then cat; return 0; fi
   awk -F'|' -v max="$AUDIO_MAX_CHANNELS" '
@@ -273,7 +281,14 @@ filter_channels() {
         split(s, p, ".")
         n = p[1] + p[2]
       }
-      if (n < 0 || n <= max) print
+      if (n < 0 || n <= max) { print; kept++ }
+      else { line[NR] = $0; ch[NR] = n; if (best == "" || n < best) best = n }
+    }
+    END {
+      if (kept == 0 && best != "") {
+        printf "⚠️ [WARN] Aucune piste audio à %d canaux au plus : pistes à %d canaux conservées.\n", max, best > "/dev/stderr"
+        for (i = 1; i <= NR; i++) if ((i in ch) && ch[i] == best) print line[i]
+      }
     }'
 }
 

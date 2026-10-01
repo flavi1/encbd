@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Flavien Guillon
-exit 0
+# Faux mkvextract : « <src> tracks ID:sortie » → flux H.264 Annex B via ffmpeg.
+# FAKE_MVC=1 ajoute une NAL de type 20 pour simuler une vue MVC.
+src="$1"; shift
+[[ "$1" == tracks ]] || exit 0
+shift
+for spec in "$@"; do
+  id="${spec%%:*}"; out="${spec#*:}"
+  ffmpeg -hide_banner -loglevel error -nostdin -y -i "$src" -map "0:$id" -c copy -bsf:v h264_mp4toannexb -f h264 "$out" || exit 2
+  if [[ "${FAKE_MVC:-0}" == 1 ]]; then printf '\x00\x00\x01\x14\x80\x00' >> "$out"; fi
+done

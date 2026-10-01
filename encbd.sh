@@ -375,6 +375,40 @@ announce_2d_fallback() {
 }
 
 # ─── MakeMKV ─────────────────────────────────────────────────────────────────
+# La règle de sélection par défaut de MakeMKV exclut la piste MVC (œil droit) et les
+# langues non préférées. makemkvcon ne l'accepte pas en option : on lui présente un HOME
+# temporaire dont ~/.MakeMKV reprend par liens TOUS les fichiers de l'utilisateur, sauf
+# settings.conf, copié avec app_DefaultSelectionString remplacé. Le vrai settings.conf
+# (et donc la clé) n'est jamais modifié ; il reste la seule source de vérité.
+MAKEMKV_HOME=""
+
+prepare_makemkv_home() {
+  if [[ -n "$MAKEMKV_HOME" || -z "$MAKEMKV_SELECTION" ]]; then return 0; fi
+  local real="$HOME/.MakeMKV" dir entry
+  mkdir -p "$real"
+  MAKEMKV_HOME="$RUN_TMP/makemkv-home"
+  dir="$MAKEMKV_HOME/.MakeMKV"
+  mkdir -p "$dir"
+  for entry in "$real"/* "$real"/.[!.]*; do
+    [[ -e "$entry" ]] || continue
+    [[ "$(basename "$entry")" == settings.conf ]] && continue
+    ln -s "$entry" "$dir/$(basename "$entry")"
+  done
+  if [[ -f "$real/settings.conf" ]]; then
+    grep -v '^[[:space:]]*app_DefaultSelectionString[[:space:]]*=' "$real/settings.conf" > "$dir/settings.conf" || true
+  fi
+  printf 'app_DefaultSelectionString = "%s"\n' "$MAKEMKV_SELECTION" >> "$dir/settings.conf"
+}
+
+makemkvcon_run() {   # <arguments makemkvcon...>
+  prepare_makemkv_home
+  if [[ -n "$MAKEMKV_HOME" ]]; then
+    HOME="$MAKEMKV_HOME" host_run "$MAKEMKVCON" "$@"
+  else
+    host_run "$MAKEMKVCON" "$@"
+  fi
+}
+
 makemkv_key_hint() {
   local conf="$HOME/.MakeMKV/settings.conf"
   if [[ ! -f "$conf" ]] || ! grep -q '^[[:space:]]*app_Key' "$conf"; then
@@ -404,7 +438,7 @@ check_makemkv_log() {   # <journal> <code makemkvcon>
 makemkv_list_titles() {
   local log="$RUN_TMP/makemkv-info.log" rc=0
   msg_step "Analyse du disque avec MakeMKV (jusqu'à une minute)..."
-  host_run "$MAKEMKVCON" -r --minlength="$MIN_SECONDS" info "$MAKEMKV_SRC" >"$log" 2>&1 || rc=$?
+  makemkvcon_run -r --minlength="$MIN_SECONDS" info "$MAKEMKV_SRC" >"$log" 2>&1 || rc=$?
   check_makemkv_log "$log" "$rc"
   TITLES="$(helper makemkv-titles "$log" || true)"
   if [[ -z "$TITLES" ]]; then
@@ -713,7 +747,7 @@ rip_title() {
       makemkv)
         msg_step "Rip du titre ${MAIN_SOURCE:-$MAIN_IDX} avec MakeMKV..."
         set +e
-        host_run "$MAKEMKVCON" -r --progress=-same --minlength="$MIN_SECONDS" \
+        makemkvcon_run -r --progress=-same --minlength="$MIN_SECONDS" \
           mkv "$MAKEMKV_SRC" "$MAIN_IDX" "$rip_dir" 2>&1 | tee "$log" | makemkv_progress
         rc=${PIPESTATUS[0]}
         set -e
@@ -750,6 +784,29 @@ rip_title() {
     die_code "$EXIT_RIP" "Aucun MKV produit par le rip dans $rip_dir."
   fi
   msg_info "MKV ripé : $RIPPED_MKV"
+
+  if [[ "$OUTPUT_3D" == true ]] && ! mkv_has_right_eye "$RIPPED_MKV"; then
+    rm -f "$rip_dir/.complete"
+    if [[ "${RIP_RETRIED:-false}" == false && "$BACKEND" == makemkv && -n "$MAKEMKV_SELECTION" ]]; then
+      msg_warn "Le MKV ripé ne contient pas l'œil droit (piste MVC) : nouveau rip avec la piste MVC."
+      RIP_RETRIED=true
+      rip_title
+      return 0
+    fi
+    die_code "$EXIT_RIP" "Le MKV ripé ne contient pas l'œil droit (piste MVC). Vérifiez que MAKEMKV_SELECTION inclut la vidéo MVC (défaut : +sel:all)."
+  fi
+}
+
+# Vrai si le MKV porte la vue droite : une 2ᵉ piste vidéo (MakeMKV) ou des NAL MVC
+# dans la piste vidéo (flux combiné).
+mkv_has_right_eye() {   # <fichier.mkv>
+  local json="$RUN_TMP/check3d.json" n sample="$RUN_TMP/check3d.h264"
+  "$MKVMERGE_BIN" -J "$1" > "$json" 2>/dev/null || return 1
+  n="$(helper mkv-video-count "$json" 2>/dev/null || echo 0)"
+  if [[ "$n" -ge 2 ]]; then return 0; fi
+  "$FFMPEG_BIN" -hide_banner -nostdin -loglevel error -y -i "$1" -map 0:v:0 -c copy \
+    -bsf:v h264_mp4toannexb -frames:v 120 -f h264 "$sample" 2>/dev/null || return 1
+  helper has-mvc "$sample"
 }
 
 # ─── Encodage 3D (délégué) ───────────────────────────────────────────────────
@@ -933,13 +990,59 @@ run_video() {
 
 # ─── CD audio ────────────────────────────────────────────────────────────────
 # Lance cyanrip dans <dossier>, journal ajouté à <journal> ; renvoie le code de cyanrip.
+# cyanrip peut sortir avec le code 0 sans rien extraire (ex. « Offset is unset! ») :
+# le succès exige aussi qu'au moins un FLAC ait été écrit pendant l'appel.
 run_cyanrip() {   # <dossier> <journal> <cyanrip> <arguments...>
-  local dir="$1" log="$2" rc; shift 2
+  local dir="$1" log="$2" rc marker; shift 2
+  marker="$RUN_TMP/cyanrip.start"
+  : > "$marker"
   set +e
   ( cd "$dir" && "$@" ) 2>&1 | tee -a "$log"
   rc=${PIPESTATUS[0]}
   set -e
+  if [[ "$rc" -eq 0 ]] && [[ -z "$(find "$dir" -type f -name '*.flac' -newer "$marker" -print -quit 2>/dev/null)" ]]; then
+    rc=1
+  fi
   return "$rc"
+}
+
+# Remplace (ou ajoute) une ligne CLÉ="valeur" dans encbd.conf.
+save_config_value() {   # <clé> <valeur>
+  if grep -q "^$1=" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i "s|^$1=.*|$1=\"$2\"|" "$CONFIG_FILE"
+  else
+    printf '%s="%s"\n' "$1" "$2" >> "$CONFIG_FILE"
+  fi
+}
+
+# Décalage de lecture du lecteur : cyanrip refuse de démarrer sans lui.
+resolve_cd_offset() {   # <cyanrip>
+  local cyan="$1" out value
+  if [[ -n "$CD_READ_OFFSET" ]]; then
+    CD_READ_OFFSET="${CD_READ_OFFSET#+}"
+    [[ "$CD_READ_OFFSET" =~ ^-?[0-9]+$ ]] || die_code "$EXIT_USAGE" "CD_READ_OFFSET : entier attendu (reçu '$CD_READ_OFFSET')."
+    return 0
+  fi
+  local how="Mesurez-le une fois avec un CD connu d'AccurateRip : encbd.appimage --run cyanrip -f -d $DEVICE
+puis indiquez CD_READ_OFFSET=\"<valeur>\" dans $CONFIG_FILE (CD_READ_OFFSET=\"0\" pour l'ignorer)."
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "Note : décalage du lecteur inconnu (CD_READ_OFFSET vide). $how"
+    return 0
+  fi
+  if is_silent; then
+    die_code "$EXIT_PREREQ" "Décalage de lecture du lecteur inconnu : cyanrip refuse d'extraire sans lui. $how"
+  fi
+  echo "Le décalage de lecture de ce lecteur n'est pas configuré (CD_READ_OFFSET)."
+  confirm "Le mesurer maintenant avec ce CD (quelques minutes, CD connu d'AccurateRip requis) ?" \
+    || die_code "$EXIT_PREREQ" "Annulé. $how"
+  out="$("$cyan" -f -d "$DEVICE" 2>&1 | tee /dev/stderr || true)"
+  value="$(grep -oE 'offset of [+-]?[0-9]+ found' <<<"$out" | tail -n1 | grep -oE '[+-]?[0-9]+' || true)"
+  if [[ -z "$value" ]]; then die_code "$EXIT_PREREQ" "Décalage introuvable avec ce CD (absent d'AccurateRip ?). $how"; fi
+  CD_READ_OFFSET="${value#+}"
+  msg_info "Décalage du lecteur : $CD_READ_OFFSET"
+  if confirm "Enregistrer CD_READ_OFFSET=\"$CD_READ_OFFSET\" dans $CONFIG_FILE ?"; then
+    save_config_value CD_READ_OFFSET "$CD_READ_OFFSET"
+  fi
 }
 
 run_cd() {
@@ -955,8 +1058,8 @@ run_cd() {
     run_dir="$(realpath "$run_dir")"; dir_scheme="$(basename "$DEST_ARG")"
   fi
 
-  base_args=(-d "$DEVICE" -o flac -D "$dir_scheme" -F "$MUSIC_FILE_TEMPLATE")
-  if [[ -n "$CD_READ_OFFSET" ]]; then base_args+=(-s "$CD_READ_OFFSET"); fi
+  resolve_cd_offset "$cyan"
+  base_args=(-d "$DEVICE" -o flac -D "$dir_scheme" -F "$MUSIC_FILE_TEMPLATE" -s "${CD_READ_OFFSET:-0}")
   if ! is_online; then base_args+=(-N -A -U); fi
 
   if [[ "$DRY_RUN" == true ]]; then
@@ -964,9 +1067,7 @@ run_cd() {
     echo "== encbd : détection (--dry-run, rien n'est écrit) =="
     printf '%-17s: %s\n' "Source" "$DEVICE" "Type" "CD audio" "Destination" "$run_dir/$dir_scheme"
     printf '%-17s: cyanrip (%s)\n' "Extraction" "$cyan"
-    if [[ -z "$CD_READ_OFFSET" ]]; then
-      echo "Note : CD_READ_OFFSET vide (0). Pour le trouver : encbd.appimage --run cyanrip -f -d $DEVICE"
-    fi
+    printf '%-17s: %s\n' "Offset lecteur" "${CD_READ_OFFSET:-inconnu}"
     echo
     "$cyan" -I "${base_args[@]}" || true
     return 0

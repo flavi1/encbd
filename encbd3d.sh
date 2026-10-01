@@ -53,30 +53,6 @@ print_settings() {
   fi
 }
 
-# stdin : lignes id|codec|lang|desc ; ne garde que les pistes ayant au plus
-# AUDIO_MAX_CHANNELS canaux (0 = pas de limite). "5.1" = 6 canaux, "7.1" = 8.
-# Une piste dont le nombre de canaux est inconnu est conservée.
-filter_channels() {
-  if [[ "$AUDIO_MAX_CHANNELS" -le 0 ]]; then cat; return 0; fi
-  awk -F'|' -v max="$AUDIO_MAX_CHANNELS" '
-    {
-      n = -1
-      if (match($0, /Channels:[ \t]*[0-9]+(\.[0-9]+)?/)) {
-        s = substr($0, RSTART, RLENGTH)
-        sub(/Channels:[ \t]*/, "", s)
-        split(s, p, ".")
-        n = p[1] + p[2]
-      }
-      if (n < 0 || n <= max) print
-    }'
-}
-
-# stdin : lignes id|codec|lang|desc ; filtre selon --lang (ex: fra,eng)
-filter_lang() {
-  if [[ -z "$LANG_FILTER" ]]; then cat; return 0; fi
-  awk -F'|' -v langs=",${LANG_FILTER}," 'index(langs, "," $3 ",")'
-}
-
 pick_encode_settings() {
   if [[ "$SILENT" != "true" && "$NO_SETTINGS_PROMPT" != "true" ]]; then
     local choice
@@ -266,19 +242,8 @@ scan_chapter_marks() {
 
 build_chapters() {
   CHAPTERS_FILE=""
-  # Source MKV (rip MakeMKV) : chapitres repris tels quels, au format simple (OGM).
-  if [[ "$SOURCE_TYPE" == "mkv" ]]; then
-    local mkvextract
-    mkvextract="$(command -v "$MKVEXTRACT_BIN" 2>/dev/null || true)"
-    if [[ -z "$mkvextract" ]]; then
-      msg_warn "mkvextract introuvable : chapitres non repris."
-      return 0
-    fi
-    CHAPTERS_FILE="$WORKDIR/chapters.txt"
-    "$mkvextract" "$SOURCE_PATH" chapters -s "$CHAPTERS_FILE" >/dev/null 2>&1 || true
-    if [[ ! -s "$CHAPTERS_FILE" ]]; then CHAPTERS_FILE=""; fi
-    return 0
-  fi
+  # Source MKV : les chapitres viennent avec le fichier au mux final.
+  if [[ "$SOURCE_TYPE" == "mkv" ]]; then return 0; fi
 
   local marks; marks="$(scan_chapter_marks)"
   if [[ -z "$marks" ]]; then return 0; fi
@@ -291,6 +256,65 @@ build_chapters() {
     printf 'CHAPTER%02d=%s\n' "$n" "$t" >> "$CHAPTERS_FILE"
     printf 'CHAPTER%02dNAME=Chapter %02d\n' "$n" "$n" >> "$CHAPTERS_FILE"
   done <<<"$marks"
+}
+
+# ─── Source MKV (rip MakeMKV) : sans tsMuxeR ────────────────────────────────
+# La piste vidéo d'un MKV 3D de MakeMKV est un flux MVC « combiné » (vue de base et vue
+# dépendante entrelacées). mvc-source le décode directement : on l'extrait tel quel avec
+# mkvextract, et l'audio, les sous-titres et les chapitres sont repris du MKV au mux final.
+# tsMuxeR lit mal ces MKV (« Reading buffer overflow… streams are not syncronized »).
+helper() { "${ENCBD_PYTHON:-python3}" "$ENCBD_LIB_DIR/encbd-helper.py" "$@"; }
+
+MKV_FPS_NUM=""; MKV_FPS_DEN=""; MKV_JSON=""
+_rm_mkv_json() { if [[ -n "$MKV_JSON" ]]; then rm -f -- "$MKV_JSON"; fi; }
+
+probe_mkv_source() {
+  local json="$1" vinfo dd
+  "$MKVMERGE_BIN" -J "$SOURCE_PATH" > "$json" \
+    || die_code "$EXIT_SOURCE" "mkvmerge ne parvient pas à lire $SOURCE_PATH"
+  MKV_TRACKS="$(helper mkv-tracks "$json" || true)"
+  local ids=()
+  read -r -a ids < <(helper mkv-video-ids "$json" || true)
+  if [[ ${#ids[@]} -eq 0 ]]; then
+    die_code "$EXIT_UNSUPPORTED" "Aucune piste vidéo H.264/MVC dans $SOURCE_PATH"
+  fi
+  # MakeMKV écrit l'œil droit (MVC) comme 2ᵉ piste vidéo ; sinon flux combiné unique.
+  AVC_TRACK_ID="${ids[0]}"
+  MVC_TRACK_ID="${ids[1]:-$AVC_TRACK_ID}"
+  vinfo="$(helper mkv-video "$json" || true)"
+  dd="$(cut -f1 <<<"$vinfo")"
+  if [[ -n "$dd" ]]; then
+    read -r MKV_FPS_NUM MKV_FPS_DEN < <(helper fps-from-ns "$dd" || true)
+  fi
+}
+
+extract_mkv_video() {
+  local marker="$WORKDIR/.video.complete" mkvextract
+  if [[ "$MVC_TRACK_ID" != "$AVC_TRACK_ID" ]]; then
+    BASE_264="$WORKDIR/base.h264"; DEP_MVC="$WORKDIR/dependent.mvc"     # deux pistes (MakeMKV)
+  else
+    BASE_264="$WORKDIR/combined.h264"; DEP_MVC=""                      # flux combiné
+  fi
+  if [[ -f "$marker" && "$(cat "$marker")" == "$AVC_TRACK_ID:$MVC_TRACK_ID" && -s "$BASE_264" ]]; then
+    echo "⏩ [INFO] Flux vidéo déjà extraits, réutilisés."
+  else
+    mkvextract="$(command -v "$MKVEXTRACT_BIN" 2>/dev/null || true)"
+    if [[ -z "$mkvextract" ]]; then die_code "$EXIT_PREREQ" "mkvextract introuvable."; fi
+    rm -f "$marker"
+    local spec=("$AVC_TRACK_ID:$BASE_264")
+    if [[ -n "$DEP_MVC" ]]; then
+      spec+=("$MVC_TRACK_ID:$DEP_MVC")
+      echo "⚙️ [INFO] Extraction des vues gauche (piste $AVC_TRACK_ID) et droite (piste $MVC_TRACK_ID) avec mkvextract..."
+    else
+      echo "⚙️ [INFO] Extraction du flux vidéo MVC combiné avec mkvextract..."
+    fi
+    "$mkvextract" "$SOURCE_PATH" tracks "${spec[@]}" \
+      || die_code "$EXIT_ENCODE" "Échec de l'extraction des pistes vidéo."
+    echo "$AVC_TRACK_ID:$MVC_TRACK_ID" > "$marker"
+  fi
+  if ! helper has-mvc "${DEP_MVC:-$BASE_264}"; then
+    die_code "$EXIT_UNSUPPORTED" "$SOURCE_PATH ne contient pas de vue MVC (œil droit) : ce MKV n'est pas en 3D. Avec MakeMKV, la piste « Mpeg4-MVC-3D » doit être sélectionnée au rip."
+  fi
 }
 
 pick_video_track_ids() {
@@ -316,13 +340,10 @@ pick_audio_tracks() {
   local tracks="$1" lines=()
   if [[ "$SILENT" == "true" ]]; then
     SELECTED_AUDIO="$(awk -F'|' '$2 ~ /^A_/' <<<"$tracks" | filter_lang | filter_channels)"
-    if [[ -z "$SELECTED_AUDIO" ]]; then echo "Warning: aucune piste audio retenue." >&2; fi
+    if [[ -z "$SELECTED_AUDIO" ]]; then msg_warn "Aucune piste audio retenue."; fi
     return 0
   fi
   mapfile -t lines < <(awk -F'|' '$2 ~ /^A_/' <<<"$tracks" | filter_channels)
-  if [[ "$AUDIO_MAX_CHANNELS" -gt 0 && ${#lines[@]} -eq 0 ]]; then
-    echo "Warning: aucune piste audio avec au plus $AUDIO_MAX_CHANNELS canaux." >&2
-  fi
   SELECTED_AUDIO="$(pick_many "Select audio track(s)" "${lines[@]}")" || true
 }
 
@@ -397,7 +418,10 @@ build_vpy() {
     echo "import vapoursynth as vs"
     echo "core = vs.core"
     echo "core.std.LoadPlugin(r\"$MVC_SOURCE_PLUGIN\")"
-    echo "clip = core.mvc.Source(r\"$BASE_264\", dependent=r\"$DEP_MVC\", stack=\"sbs\")"
+    local extra=""
+    if [[ -n "${DEP_MVC:-}" ]]; then extra+=", dependent=r\"$DEP_MVC\""; fi
+    if [[ -n "$MKV_FPS_NUM" && -n "$MKV_FPS_DEN" ]]; then extra+=", fpsnum=$MKV_FPS_NUM, fpsden=$MKV_FPS_DEN"; fi
+    echo "clip = core.mvc.Source(r\"$BASE_264\", stack=\"sbs\"$extra)"
     # Le plugin produit toujours du SBS full. Pour le TaB ou le mode half,
     # on sépare les deux yeux, on redimensionne chacun, puis on ré-empile.
     if [[ "$STEREO_LAYOUT" != "sbs" || "$SBS_MODE" != "full" ]]; then
@@ -484,8 +508,15 @@ build_mkvmerge_json() {
   args+=("--default-track" "0:yes")
   args+=("$ENCODED_FILE")
 
-  local first=1
-  if [[ -n "${SELECTED_AUDIO:-}" ]]; then
+  local first=1 ids
+  if [[ "$SOURCE_TYPE" == "mkv" ]]; then
+    args+=("--no-video" "--no-attachments")
+    ids="$(cut -d'|' -f1 <<<"${SELECTED_AUDIO:-}" | sed '/^$/d' | paste -sd, - || true)"
+    if [[ -n "$ids" ]]; then args+=("--audio-tracks" "$ids"); else args+=("--no-audio"); fi
+    ids="$(cut -d'|' -f1 <<<"${SELECTED_SUBS:-}" | sed '/^$/d' | paste -sd, - || true)"
+    if [[ -n "$ids" ]]; then args+=("--subtitle-tracks" "$ids"); else args+=("--no-subtitles"); fi
+    args+=("$SOURCE_PATH")
+  elif [[ -n "${SELECTED_AUDIO:-}" ]]; then
     while IFS='|' read -r id codec lang desc; do
       local f; f="$(find "$WORKDIR" -maxdepth 1 -iname "*track_${id}*" ! -iname "*.264" ! -iname "*.mvc" | head -1)"
       if [[ -n "$f" ]]; then
@@ -570,15 +601,18 @@ main() {
 
   exit_if_final_exists
 
+  local tracks
   if [[ "$SOURCE_TYPE" == "bdmv" ]]; then
     pick_playlist
     run_tsmuxer_scan "$PLAYLIST_PATH"
+    tracks="$(scan_tracks)"
+    pick_video_track_ids "$tracks"
   else
-    run_tsmuxer_scan "$SOURCE_PATH"
+    MKV_JSON="$(mktemp -t encbd3d-mkv.XXXXXX.json)"
+    encbd_add_exit_hook _rm_mkv_json
+    probe_mkv_source "$MKV_JSON"
+    tracks="$MKV_TRACKS"
   fi
-  local tracks; tracks="$(scan_tracks)"
-
-  pick_video_track_ids "$tracks"
   pick_audio_tracks "$tracks"
   pick_subtitle_tracks "$tracks"
   pick_encode_settings
@@ -588,9 +622,13 @@ main() {
 
   if [[ "$INHIBIT_SLEEP" == "true" ]]; then start_inhibit "Encodage vidéo en cours (encbd3d)"; fi
 
-  build_demux_meta
-  run_demux
-  find_demuxed_files
+  if [[ "$SOURCE_TYPE" == "bdmv" ]]; then
+    build_demux_meta
+    run_demux
+    find_demuxed_files
+  else
+    extract_mkv_video
+  fi
   build_vpy
   probe_encoded_video
   run_encode

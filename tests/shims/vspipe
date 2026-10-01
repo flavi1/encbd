@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
+# Faux vspipe : --info décrit une image TAB 640x360 ; -c y4m produit 4 s de mire.
+if [[ "$1" == --info ]]; then printf 'Width: 640\nHeight: 360\nFrames: 96\nFPS: 24000/1001\n'; exit 0; fi
+exec ffmpeg -hide_banner -loglevel error -nostdin -f lavfi -i testsrc=size=640x360:rate=24000/1001:duration=4 -pix_fmt yuv420p -f yuv4mpegpipe -
