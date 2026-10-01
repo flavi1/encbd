@@ -184,7 +184,9 @@ git commit -m "Sous-modules"
 ./build.sh             # compile VapourSynth R65, tsMuxeR, mvc-source, puis encbd.appimage
 ```
 
-`build.sh` embarque `encbd.sh`, `encbd3d.sh`, `lib/`, x264, ffmpeg, mkvmerge, mkvextract, fzf, le Python embarqué et, s'ils sont installés sur la machine de compilation, cyanrip, sacd_extract, wavpack, libaacs, libbdplus et libdvdcss. Une absence est signalée et désactive seulement la fonction correspondante. sacd_extract n'est empaqueté par presque aucune distribution : compilez-le depuis [sacd-ripper](https://github.com/sacd-ripper/sacd-ripper).
+Les sous-modules compilés sont VapourSynth R65, tsMuxeR, mvc-source (avec edge264-mvc) et `sacd_extract`. Ce dernier vient du fork maintenu [EuFlo/sacd-ripper](https://github.com/EuFlo/sacd-ripper) : le dépôt d'origine et le fork cité par la plupart des guides ne sont plus suivis ou plus accessibles. Sa compilation demande cmake et libxml2 (`libxml2-dev` sous Debian/Ubuntu).
+
+`build.sh` embarque aussi `encbd.sh`, `encbd3d.sh`, `lib/`, x264, ffmpeg, mkvmerge, mkvextract, fzf, le Python embarqué et, s'ils sont installés sur la machine de compilation, cyanrip, wavpack, libaacs, libbdplus et libdvdcss. Une absence est signalée et désactive seulement la fonction correspondante.
 
 ## Tests
 

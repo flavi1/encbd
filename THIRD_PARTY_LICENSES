@@ -53,6 +53,14 @@ tsMuxeR
   Source   : https://github.com/teaching-droid/tsMuxer
   Texte    : licenses/Apache-2.0.txt
 
+sacd_extract (sacd-ripper, fork EuFlo)
+  Rôle     : extraction des pistes DSD d'une image ISO de SACD
+  Licence  : GPL-2.0-or-later
+  Auteurs  : Copyright (c) 2010-2015, auteurs respectifs de SACD Ripper
+  Source   : https://github.com/EuFlo/sacd-ripper (dossier tools/sacd_extract ;
+             fork maintenu de https://github.com/sacd-ripper/sacd-ripper)
+  Texte    : licenses/GPL-2.0.txt
+
 
 2. Copiés depuis la machine de compilation (paquets de la distribution)
 -----------------------------------------------------------------------
@@ -69,6 +77,8 @@ Python (interpréteur    PSF-2.0                   https://www.python.org
   et bibliothèque
   standard)
 zimg (via VapourSynth)  WTFPL                     https://github.com/sekrit-twc/zimg
+libxml2 (via            MIT                       https://gitlab.gnome.org/GNOME/libxml2
+  sacd_extract)
 
 Bibliothèques partagées tirées par ces programmes (libbluray, libdvdread, libdvdnav,
 OpenSSL, libffi, zlib, expat, freetype, etc.) : licences et versions exactes relevées
@@ -85,7 +95,6 @@ cyanrip                 LGPL-2.1-or-later         https://github.com/cyanreg/cya
   dont libcdio-paranoia GPL-3.0-or-later          https://github.com/rocky/libcdio-paranoia
   dont libmusicbrainz5  LGPL-2.1-or-later         https://musicbrainz.org/doc/libmusicbrainz
   dont libcurl          curl (licence de type MIT) https://curl.se
-sacd_extract            GPL-2.0-or-later          https://github.com/sacd-ripper/sacd-ripper
 WavPack                 BSD-3-Clause              https://www.wavpack.com
 
 Textes GPL-2.0 et LGPL-2.1 : licenses/GPL-2.0.txt, licenses/LGPL-2.1.txt.

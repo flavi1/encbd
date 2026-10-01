@@ -10,3 +10,6 @@
 [submodule "tsMuxer"]
 	path = tsMuxer
 	url = https://github.com/teaching-droid/tsMuxer.git
+[submodule "sacd-ripper"]
+	path = sacd-ripper
+	url = https://github.com/EuFlo/sacd-ripper.git

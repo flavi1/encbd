@@ -34,6 +34,8 @@ VS_DIR="$SCRIPT_DIR/vapoursynth"
 TSMUXER_DIR="$SCRIPT_DIR/tsMuxer"
 MVC_DIR="$SCRIPT_DIR/mvc-source"
 EDGE264_DIR="$SCRIPT_DIR/edge264-mvc"
+SACD_DIR="$SCRIPT_DIR/sacd-ripper"          # fork EuFlo : seul sacd_extract est compilé
+SACD_BIN="$SCRIPT_DIR/.cache/sacd_extract-build/sacd_extract"   # compilé hors du sous-module
 VS_PIN_TAG="R65"     # tag VapourSynth attendu (voir check_pins)
 
 APPIMAGETOOL_URLS=(
@@ -69,7 +71,7 @@ usage() {
 Usage : $0 [options] [cible...]
 
 Sans cible : compile les dépendances puis génère l'AppImage.
-Avec cible(s) (vapoursynth | tsmuxer | mvc-source) : compile seulement celles-ci.
+Avec cible(s) (vapoursynth | tsmuxer | mvc-source | sacd-extract) : compile seulement celles-ci.
 
 Options :
   --force           Compile même si une version système existe (VapourSynth, tsMuxeR)
@@ -98,7 +100,7 @@ parse_args() {
       --output) [[ $# -ge 2 ]] || die "--output attend un argument"; OUTPUT="$2"; shift ;;
       --script) [[ $# -ge 2 ]] || die "--script attend un argument"; MAIN_SCRIPT="$2"; shift ;;
       -h|--help) usage; exit 0 ;;
-      vapoursynth|tsmuxer|mvc-source) TARGETS+=("$1") ;;
+      vapoursynth|tsmuxer|mvc-source|sacd-extract) TARGETS+=("$1") ;;
       *) die "Option ou cible inconnue : $1 (voir --help)" ;;
     esac
     shift
@@ -107,7 +109,7 @@ parse_args() {
   if [[ ${#TARGETS[@]} -gt 0 ]]; then
     DO_APPIMAGE=false      # cibles explicites = compilation seule
   else
-    TARGETS=(vapoursynth tsmuxer mvc-source)
+    TARGETS=(vapoursynth tsmuxer mvc-source sacd-extract)
   fi
   if [[ "$DO_DEPS" == false && "$DO_APPIMAGE" == false ]]; then
     die "--appimage-only et --deps-only/cibles sont incompatibles"
@@ -165,6 +167,7 @@ libbdplus|libbdplus0|libbdplus|libbdplus|libbdplus0
 libdvdcss|libdvd-pkg|libdvdcss|libdvdcss|libdvdcss2
 cyanrip|cyanrip|cyanrip|cyanrip|cyanrip
 wavpack|wavpack|wavpack|wavpack|wavpack
+libxml2|libxml2-dev|libxml2-devel|libxml2|libxml2-devel
 wget|wget|wget|wget|wget
 ldd|libc-bin|glibc-common|glibc|glibc
 '
@@ -257,6 +260,7 @@ check_sources() {
     [[ -d "$MVC_DIR" ]] || missing+=("mvc-source")
     [[ -d "$EDGE264_DIR" ]] || missing+=("edge264-mvc")
   fi
+  if want_target sacd-extract; then [[ -d "$SACD_DIR/tools/sacd_extract" ]] || missing+=("sacd-ripper"); fi
   if [[ "$DO_DEPS" == false ]]; then missing=(); fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     for d in "${missing[@]}"; do echo "  - dossier manquant : $SCRIPT_DIR/$d" >&2; done
@@ -320,6 +324,13 @@ check_build_tools() {
     require_cmd gcc cc "compilateur C (mvc-source / edge264)"
     require_cmd make make "make"
   fi
+  if want_target sacd-extract; then
+    require_cmd gcc cc "compilateur C (sacd_extract)"
+    require_cmd cmake cmake "cmake (sacd_extract)"
+    require_cmd make make "make"
+    require_cmd pkg-config pkgconf "pkg-config"
+    require_pc libxml-2.0 libxml2 "libxml2 (sacd_extract)"
+  fi
 }
 
 # Outils facultatifs : leur absence désactive une fonction, sans bloquer la génération.
@@ -355,7 +366,10 @@ check_runtime_tools() {
     if ! command -v "$t" >/dev/null 2>&1; then
       case "$t" in
         cyanrip) warn "cyanrip absent ($(install_cmd) $(pkg_name cyanrip)) : CD audio non pris en charge par l'AppImage." ;;
-        sacd_extract) warn "sacd_extract absent (https://github.com/sacd-ripper/sacd-ripper, à compiler) : SACD non pris en charge." ;;
+        sacd_extract)
+          if ! { want_target sacd-extract && [[ "$DO_DEPS" == true ]]; } && [[ ! -x "$SACD_BIN" ]]; then
+            warn "sacd_extract absent (lancez : ./build.sh sacd-extract) : SACD non pris en charge."
+          fi ;;
         wavpack) warn "wavpack absent ($(install_cmd) $(pkg_name wavpack)) : format SACD wavpack (et mode --silent SACD) indisponible." ;;
       esac
     fi
@@ -453,7 +467,7 @@ init_sources() {
   fi
 
   step "Sous-modules prêts. Pour les enregistrer dans le dépôt :"
-  info "git commit -m \"Sous-modules : edge264-mvc, mvc-source, vapoursynth $VS_PIN_TAG, tsMuxer\""
+  info "git commit -m \"Sous-modules : edge264-mvc, mvc-source, vapoursynth $VS_PIN_TAG, tsMuxer, sacd-ripper\""
 }
 
 # ─── Compilation des dépendances (ex build_deps.sh) ─────────────────────────
@@ -483,6 +497,18 @@ build_mvc_source() {
   ( cd "$MVC_DIR" && make libvsmvc.so EDGE264_SRC="$EDGE264_DIR" EDGE264_MAKE="CFLAGS=-fPIC" -j"$JOBS" )
 }
 
+build_sacd_extract() {
+  # Le CMakeLists amont appelle `xml2-config --cflags`, absent de certaines distributions :
+  # on fournit les options de libxml2 par pkg-config. CMAKE_POLICY_VERSION_MINIMUM : CMake ≥ 4.
+  local dir="$SACD_DIR/tools/sacd_extract" build_dir
+  build_dir="$(dirname "$SACD_BIN")"
+  cmake -S "$dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    -DCMAKE_C_FLAGS="$(pkg-config --cflags libxml-2.0)" \
+    -DCMAKE_EXE_LINKER_FLAGS="$(pkg-config --libs-only-L libxml-2.0)"
+  cmake --build "$build_dir" -j"$JOBS"
+  [[ -x "$SACD_BIN" ]] || die "sacd_extract non produit (voir les messages de compilation ci-dessus)."
+}
+
 build_dependencies() {
   local t
   for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
@@ -491,6 +517,7 @@ build_dependencies() {
       vapoursynth) build_vapoursynth ;;
       tsmuxer) build_tsmuxer ;;
       mvc-source) build_mvc_source ;;
+      sacd-extract) build_sacd_extract ;;
     esac
   done
 }
@@ -693,7 +720,13 @@ ai_bundle_tools() {
   local tool lib path
   for tool in x264 ffmpeg mkvmerge mkvextract fzf; do bundle_tool "$tool"; done
   for tool in "${OPTIONAL_TOOLS[@]}"; do
-    if command -v "$tool" >/dev/null 2>&1; then bundle_tool "$tool"; info "facultatif embarqué : $tool"; fi
+    if [[ "$tool" == sacd_extract && -x "$SACD_BIN" ]]; then
+      install -m 755 "$SACD_BIN" "$BIN_DIR/sacd_extract"    # compilé depuis le sous-module
+      bundle_libs_of "$SACD_BIN"
+      info "embarqué : sacd_extract (sous-module sacd-ripper)"
+    elif command -v "$tool" >/dev/null 2>&1; then
+      bundle_tool "$tool"; info "facultatif embarqué : $tool"
+    fi
   done
 
   # Bibliothèques dlopen : copiées sous leur soname, avec leurs propres dépendances.
@@ -933,6 +966,8 @@ copy_package_licenses() {   # <paquet> <dossier>
   [[ -n "$(ls -A "$dest" 2>/dev/null)" ]] || rmdir "$dest" 2>/dev/null || true
 }
 
+SUBMODULES=(edge264-mvc mvc-source vapoursynth tsMuxer sacd-ripper)
+
 submodule_rev() {   # <dossier>
   git -C "$1" rev-parse --short=12 HEAD 2>/dev/null || echo "inconnu"
 }
@@ -948,7 +983,7 @@ ai_collect_licenses() {
 
   # Sous-modules compilés : leurs propres fichiers de licence.
   local name dir file
-  for name in edge264-mvc mvc-source vapoursynth tsMuxer; do
+  for name in "${SUBMODULES[@]}"; do
     dir="$SCRIPT_DIR/$name"
     mkdir -p "$lic/$name"
     for file in LICENSE LICENSE_BSD.txt LICENSE.md COPYING COPYING.LESSER COPYING.LGPLv2.1; do
@@ -962,7 +997,7 @@ ai_collect_licenses() {
     echo "# Distribution de compilation : $DISTRO_NAME"
     echo
     echo "## Compilés depuis les sous-modules (source : commit indiqué)"
-    for name in edge264-mvc mvc-source vapoursynth tsMuxer; do
+    for name in "${SUBMODULES[@]}"; do
       printf '%-14s %s\n' "$name" "$(submodule_rev "$SCRIPT_DIR/$name")"
     done
     echo
