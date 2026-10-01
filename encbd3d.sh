@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # Mettre DEBUG=1 dans l'environnement pour afficher chaque commande exécutée
 if [[ "${DEBUG:-0}" == "1" ]]; then set -x; fi
 set -euo pipefail

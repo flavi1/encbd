@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # build.sh — compile les dépendances (VapourSynth R65, tsMuxeR, mvc-source) puis
 # assemble l'AppImage autonome "encbd.appimage" (encbd.sh + encbd3d.sh).
 #
@@ -42,6 +44,7 @@ APPIMAGETOOL_URLS=(
 # Options (modifiées par parse_args)
 FORCE=false
 CHECK_ONLY=false
+INIT_SOURCES=false
 DO_DEPS=true
 DO_APPIMAGE=true
 KEEP_APPDIR=false
@@ -71,6 +74,8 @@ Avec cible(s) (vapoursynth | tsmuxer | mvc-source) : compile seulement celles-ci
 Options :
   --force           Compile même si une version système existe (VapourSynth, tsMuxeR)
   --check           Vérifie les prérequis puis s'arrête
+  --init-sources    Enregistre et récupère les sous-modules listés dans .gitmodules
+                    (VapourSynth épinglé sur $VS_PIN_TAG), puis s'arrête
   --deps-only       Compile les dépendances sans générer l'AppImage
   --appimage-only   Génère l'AppImage à partir de ce qui est déjà compilé
   --output FICHIER  Fichier de sortie (défaut : $OUTPUT)
@@ -86,6 +91,7 @@ parse_args() {
     case "$1" in
       --force) FORCE=true ;;
       --check) CHECK_ONLY=true ;;
+      --init-sources) INIT_SOURCES=true ;;
       --deps-only) DO_APPIMAGE=false ;;
       --appimage-only) DO_DEPS=false ;;
       --keep-appdir) KEEP_APPDIR=true ;;
@@ -254,11 +260,20 @@ check_sources() {
   if [[ "$DO_DEPS" == false ]]; then missing=(); fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     for d in "${missing[@]}"; do echo "  - dossier manquant : $SCRIPT_DIR/$d" >&2; done
-    die "Sources absentes. Récupérez-les (ex : git submodule update --init --recursive)."
+    if git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1 \
+       && [[ -z "$(git -C "$SCRIPT_DIR" ls-files --stage | awk '$1 == "160000"')" ]]; then
+      echo >&2
+      echo "Le dépôt a un .gitmodules mais aucun sous-module enregistré dans son index :" >&2
+      echo "« git submodule update » n'a donc rien à récupérer." >&2
+      die "Lancez : ./build.sh --init-sources   (puis validez avec git commit)"
+    fi
+    die "Sources absentes. Lancez : ./build.sh --init-sources"
   fi
   if [[ "$DO_APPIMAGE" == true ]]; then
     [[ -f "$MAIN_SCRIPT" ]] || die "Script principal introuvable : $MAIN_SCRIPT (option --script)"
     [[ -f "$SCRIPT_3D" ]] || die "Script 3D introuvable : $SCRIPT_3D"
+    [[ -f "$SCRIPT_DIR/LICENSE" && -f "$SCRIPT_DIR/THIRD_PARTY_LICENSES" ]] \
+      || die "LICENSE ou THIRD_PARTY_LICENSES manquant : ils sont obligatoires dans l'AppImage distribuée."
     [[ -f "$LIB_SRC_DIR/encbd-common.sh" && -f "$LIB_SRC_DIR/encbd-helper.py" ]] \
       || die "Bibliothèque incomplète dans $LIB_SRC_DIR (encbd-common.sh, encbd-helper.py)"
   fi
@@ -402,6 +417,45 @@ check_prerequisites() {
   report_missing
 }
 
+# ─── Récupération des sources (sous-modules) ────────────────────────────────
+# Un .gitmodules seul ne suffit pas : git ne récupère un sous-module que s'il est
+# aussi enregistré dans l'index (entrée « gitlink », mode 160000). C'est le cas
+# quand les fichiers ont été copiés dans un dépôt neuf : on les ajoute alors.
+init_sources() {
+  command -v git >/dev/null 2>&1 || die "git est nécessaire pour récupérer les sous-modules."
+  git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "$SCRIPT_DIR n'est pas un dépôt git (lancez d'abord : git init)."
+  [[ -f "$SCRIPT_DIR/.gitmodules" ]] || die "$SCRIPT_DIR/.gitmodules introuvable."
+
+  local key name path url
+  while read -r key path; do
+    name="${key#submodule.}"; name="${name%.path}"
+    url="$(git -C "$SCRIPT_DIR" config -f .gitmodules "submodule.$name.url")"
+    if git -C "$SCRIPT_DIR" ls-files --stage -- "$path" | awk '$1 == "160000"' | grep -q .; then
+      step "Sous-module $path : déjà enregistré, mise à jour"
+      git -C "$SCRIPT_DIR" submodule update --init --recursive -- "$path"
+    else
+      if [[ -e "$SCRIPT_DIR/$path" && -n "$(ls -A "$SCRIPT_DIR/$path" 2>/dev/null)" ]]; then
+        die "$path existe déjà et n'est pas vide : déplacez-le, puis relancez --init-sources."
+      fi
+      step "Sous-module $path : ajout ($url)"
+      git -C "$SCRIPT_DIR" submodule add --force "$url" "$path"
+      git -C "$SCRIPT_DIR" submodule update --init --recursive -- "$path"
+    fi
+  done < <(git -C "$SCRIPT_DIR" config -f "$SCRIPT_DIR/.gitmodules" --get-regexp '^submodule\..*\.path$')
+
+  if [[ -d "$VS_DIR" ]]; then
+    step "VapourSynth : épinglage sur $VS_PIN_TAG"
+    git -C "$VS_DIR" fetch --tags --quiet origin || warn "Récupération des tags VapourSynth impossible."
+    git -C "$VS_DIR" -c advice.detachedHead=false checkout --quiet "$VS_PIN_TAG" \
+      || die "Tag $VS_PIN_TAG introuvable dans $VS_DIR."
+    git -C "$SCRIPT_DIR" add "$(basename "$VS_DIR")"
+  fi
+
+  step "Sous-modules prêts. Pour les enregistrer dans le dépôt :"
+  info "git commit -m \"Sous-modules : edge264-mvc, mvc-source, vapoursynth $VS_PIN_TAG, tsMuxer\""
+}
+
 # ─── Compilation des dépendances (ex build_deps.sh) ─────────────────────────
 build_vapoursynth() {
   if ! need_build_vapoursynth; then
@@ -465,6 +519,11 @@ is_excluded_lib() {
 
 declare -A UNRESOLVED_LIBS=()
 
+# Origine de chaque fichier copié depuis la machine de compilation : sert à relever
+# les paquets, versions et licences embarqués (ai_collect_licenses).
+declare -A BUNDLED_ORIGINS=()
+record_origin() { BUNDLED_ORIGINS["$1"]=1; }
+
 # Copie dans $LIB_DIR les dépendances dynamiques de <elf>. ldd est déjà transitif.
 bundle_libs_of() {   # <elf> [chemin de recherche supplémentaire]
   local elf="$1" ldp="${2:-}" line name arrow path base
@@ -478,6 +537,7 @@ bundle_libs_of() {   # <elf> [chemin de recherche supplémentaire]
     if is_excluded_lib "$base"; then continue; fi
     if [[ -e "$LIB_DIR/$base" ]]; then continue; fi
     cp -L "$path" "$LIB_DIR/$base"
+    record_origin "$path"
   done < <(LD_LIBRARY_PATH="$ldp" ldd "$elf" 2>/dev/null || true)
 }
 
@@ -567,6 +627,7 @@ ai_bundle_python() {
 
   mkdir -p "$PY_STDLIB_DEST"
   cp -a "$stdlib/." "$PY_STDLIB_DEST/"
+  record_origin "$stdlib/os.py"
   # Fedora/SUSE : les extensions (lib-dynload) vivent dans lib64 → on fusionne.
   if [[ "$platstdlib" != "$stdlib" && -d "$platstdlib" ]]; then
     cp -a "$platstdlib/." "$PY_STDLIB_DEST/"
@@ -596,6 +657,7 @@ ai_bundle_python() {
   # (./encbd.appimage --python -c "import vapoursynth")
   mkdir -p "$PY_HOME/bin"
   install -m 755 "$(readlink -f "$PY_BIN")" "$PY_HOME/bin/python3"
+  record_origin "$(readlink -f "$PY_BIN")"
   bundle_libs_of "$(readlink -f "$PY_BIN")"
 }
 
@@ -619,6 +681,7 @@ bundle_tool() {   # <commande>
     warn "$tool ($path) n'est pas un binaire ELF (script/wrapper ?) : copié tel quel, portabilité non garantie."
   fi
   install -m 755 "$path" "$BIN_DIR/$tool"
+  record_origin "$path"
   bundle_libs_of "$path"
 }
 
@@ -638,6 +701,7 @@ ai_bundle_tools() {
     path="$(find_shared_lib "$lib")"
     if [[ -n "$path" ]]; then
       cp -L "$path" "$LIB_DIR/$lib"
+      record_origin "$path"
       bundle_libs_of "$path"
       info "bibliothèque dlopen embarquée : $lib"
     fi
@@ -826,6 +890,7 @@ case "${1:-}" in
   --selftest) rc=0; selftest || rc=$?; exit "$rc" ;;
   3d)         shift; exec "$APPDIR/usr/bin/encbd3d.sh" "$@" ;;   # encbd3d.sh directement
   --python)   shift; exec "$PY" "$@" ;;                       # Python embarqué
+  --licenses) cat "$APPDIR/usr/share/licenses/THIRD_PARTY_LICENSES" "$APPDIR/usr/share/licenses/SOURCES.txt"; exit 0 ;;
   --run)      shift; exec "$@" ;;                             # commande dans l'environnement de l'AppImage
   --shell)    exec "${SHELL:-/bin/bash}" ;;                   # shell dans cet environnement
 esac
@@ -833,6 +898,96 @@ esac
 exec "$APPDIR/usr/bin/@MAIN@" "$@"
 APPRUN_EOF
   chmod +x "$APPDIR/AppRun"
+}
+
+# ─── Packaging : licences des composants embarqués ──────────────────────────
+# Paquet propriétaire d'un fichier : « nom version », vide si inconnu.
+owning_package() {   # <fichier>
+  local f="$1" alt cand pkg=""
+  local cands=("$f" "$(readlink -f "$f")")
+  alt="${f#/usr}"; [[ "$alt" != "$f" ]] && cands+=("$alt")
+  for cand in "${cands[@]}"; do
+    case "$PKG_FAMILY" in
+      apt)
+        pkg="$(dpkg -S "$cand" 2>/dev/null | head -n1 | cut -d: -f1 | cut -d, -f1 || true)"
+        if [[ -n "$pkg" ]]; then echo "$pkg $(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"; return; fi ;;
+      dnf|zypper)
+        pkg="$(rpm -qf --qf '%{NAME} %{VERSION}-%{RELEASE}\n' "$cand" 2>/dev/null | head -n1 || true)"
+        if [[ -n "$pkg" && "$pkg" != *"not owned"* ]]; then echo "$pkg"; return; fi ;;
+      pacman)
+        pkg="$(pacman -Qqo "$cand" 2>/dev/null | head -n1 || true)"
+        if [[ -n "$pkg" ]]; then pacman -Q "$pkg" 2>/dev/null; return; fi ;;
+    esac
+  done
+}
+
+# Copie les fichiers de licence d'un paquet dans <dossier>.
+copy_package_licenses() {   # <paquet> <dossier>
+  local pkg="$1" dest="$2" f
+  mkdir -p "$dest"
+  case "$PKG_FAMILY" in
+    apt) [[ -f "/usr/share/doc/$pkg/copyright" ]] && cp -L "/usr/share/doc/$pkg/copyright" "$dest/" ;;
+    dnf|zypper) while IFS= read -r f; do [[ -f "$f" ]] && cp -L "$f" "$dest/"; done < <(rpm -qL "$pkg" 2>/dev/null || true) ;;
+    pacman) [[ -d "/usr/share/licenses/$pkg" ]] && cp -rL "/usr/share/licenses/$pkg/." "$dest/" ;;
+  esac
+  [[ -n "$(ls -A "$dest" 2>/dev/null)" ]] || rmdir "$dest" 2>/dev/null || true
+}
+
+submodule_rev() {   # <dossier>
+  git -C "$1" rev-parse --short=12 HEAD 2>/dev/null || echo "inconnu"
+}
+
+ai_collect_licenses() {
+  step "Licences des composants embarqués"
+  local lic="$APPDIR/usr/share/licenses" src pkgline pkg unknown_count=0
+  declare -A seen_pkg=()
+  mkdir -p "$lic/encbd"
+  install -m 644 "$SCRIPT_DIR/LICENSE" "$lic/encbd/LICENSE"
+  install -m 644 "$SCRIPT_DIR/THIRD_PARTY_LICENSES" "$lic/THIRD_PARTY_LICENSES"
+  if [[ -d "$SCRIPT_DIR/licenses" ]]; then cp -a "$SCRIPT_DIR/licenses/." "$lic/encbd/"; fi
+
+  # Sous-modules compilés : leurs propres fichiers de licence.
+  local name dir file
+  for name in edge264-mvc mvc-source vapoursynth tsMuxer; do
+    dir="$SCRIPT_DIR/$name"
+    mkdir -p "$lic/$name"
+    for file in LICENSE LICENSE_BSD.txt LICENSE.md COPYING COPYING.LESSER COPYING.LGPLv2.1; do
+      [[ -f "$dir/$file" ]] && cp -L "$dir/$file" "$lic/$name/"
+    done
+    [[ -n "$(ls -A "$lic/$name")" ]] || { warn "Aucun fichier de licence trouvé dans $dir"; rmdir "$lic/$name"; }
+  done
+
+  {
+    echo "# Composants de encbd.appimage et leur origine (généré par build.sh le $(date -u +%Y-%m-%d))"
+    echo "# Distribution de compilation : $DISTRO_NAME"
+    echo
+    echo "## Compilés depuis les sous-modules (source : commit indiqué)"
+    for name in edge264-mvc mvc-source vapoursynth tsMuxer; do
+      printf '%-14s %s\n' "$name" "$(submodule_rev "$SCRIPT_DIR/$name")"
+    done
+    echo
+    echo "## Copiés depuis la machine de compilation : fichier → paquet version"
+    while IFS= read -r src; do
+      pkgline="$(owning_package "$src")"
+      if [[ -n "$pkgline" ]]; then
+        printf '%s\t%s\n' "$src" "$pkgline"
+        pkg="${pkgline%% *}"
+        if [[ -z "${seen_pkg[$pkg]:-}" ]]; then
+          seen_pkg[$pkg]=1
+          copy_package_licenses "$pkg" "$lic/$pkg"
+        fi
+      else
+        printf '%s\t%s\n' "$src" "paquet inconnu (installé hors gestionnaire de paquets)"
+        unknown_count=$((unknown_count + 1))
+      fi
+    done < <(printf '%s\n' "${!BUNDLED_ORIGINS[@]}" | sort)
+  } > "$lic/SOURCES.txt"
+
+  info "$(( ${#seen_pkg[@]} )) paquet(s) relevé(s), licences copiées dans usr/share/licenses/"
+  if [[ "$unknown_count" -gt 0 ]]; then
+    warn "$unknown_count fichier(s) embarqué(s) sans paquet identifiable (voir usr/share/licenses/SOURCES.txt) :"
+    warn "ajoutez leur licence et l'adresse de leur source à la main avant de distribuer l'AppImage."
+  fi
 }
 
 ai_write_metadata() {
@@ -912,6 +1067,7 @@ make_appimage() {
   ai_bundle_tools
   ai_bundle_script
   ai_report_unresolved
+  ai_collect_licenses
   ai_write_apprun
   ai_write_metadata
   ai_selftest_appdir
@@ -926,6 +1082,7 @@ make_appimage() {
 main() {
   parse_args "$@"
   detect_distro
+  if [[ "$INIT_SOURCES" == true ]]; then init_sources; return 0; fi
   check_prerequisites
   if [[ "$CHECK_ONLY" == true ]]; then
     step "Mode --check : rien à compiler."

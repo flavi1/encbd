@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 """Fabrique de faux disques pour les tests (aucun contenu vidéo réel)."""
 import os
 import struct

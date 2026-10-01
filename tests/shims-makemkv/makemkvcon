@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # Faux makemkvcon pour les tests. FAKE_MAKEMKV_MODE : ok | expired | uhdfail
 set -u
 mode="${FAKE_MAKEMKV_MODE:-ok}"

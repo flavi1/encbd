@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 """Faux mkvmerge (sous-ensemble utilisé par encbd.sh) bâti sur ffprobe/ffmpeg."""
 import json, subprocess, sys
 a = sys.argv[1:]

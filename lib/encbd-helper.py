@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 """encbd-helper.py — tâches d'analyse appelées par encbd.sh.
 
 Uniquement la bibliothèque standard (exécuté par le Python embarqué de l'AppImage).

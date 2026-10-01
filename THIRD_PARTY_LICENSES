@@ -1,0 +1,112 @@
+encbd — composants tiers et licences
+=====================================
+
+Les scripts d'encbd (encbd.sh, encbd3d.sh, build.sh, lib/, tests/) sont distribués
+sous GPL-3.0-or-later (voir LICENSE).
+
+L'AppImage encbd.appimage réunit en plus les programmes et bibliothèques ci-dessous.
+Ce sont des programmes distincts, lancés par les scripts ; chacun reste soumis à sa
+propre licence. Les textes de licence sont dans le dossier licenses/ du dépôt et, dans
+l'AppImage, sous usr/share/licenses/ (copiés par build.sh au moment de l'assemblage,
+avec la liste des paquets et versions effectivement embarqués : usr/share/licenses/SOURCES.txt).
+
+Pour obtenir le code source correspondant d'un composant de l'AppImage :
+  - composants compilés depuis les sous-modules : le commit exact est celui enregistré
+    dans ce dépôt (git submodule status) ;
+  - composants copiés depuis la machine de compilation : SOURCES.txt indique le paquet
+    et sa version ; leur source est publiée par la distribution concernée, ou disponible
+    sur demande auprès de la personne qui distribue l'AppImage, pendant au moins trois ans.
+
+Vérifié le 2026-10-01 auprès des dépôts amont (fichiers LICENSE / COPYING et en-têtes).
+
+
+1. Compilés depuis les sous-modules de ce dépôt
+-----------------------------------------------
+
+edge264-mvc
+  Rôle     : décodeur H.264 / MVC, lié statiquement dans libvsmvc.so
+  Licence  : BSD-3-Clause
+  Auteurs  : Copyright (c) 2013-2014 Celticom / TVLabs ;
+             Copyright (c) 2014-2026 Thibault Raffaillac ;
+             Copyright (c) 2026 Jens Duttke
+  Source   : https://github.com/jens-duttke/edge264-mvc (fork de tvlabs/edge264)
+  Texte    : licenses/BSD-3-Clause-edge264-mvc.txt
+
+mvc-source (libvsmvc.so)
+  Rôle     : greffon VapourSynth de décodage 3D MVC
+  Licence  : BSD-3-Clause
+  Auteur   : Copyright (c) 2026 Jens Duttke
+  Source   : https://github.com/jens-duttke/mvc-source
+  Texte    : licenses/BSD-3-Clause-mvc-source.txt
+  Note     : compilé avec les en-têtes du SDK VapourSynth (LGPL-2.1-or-later). Les
+             en-têtes AviSynth+ du dépôt (GPL-2.0-or-later avec exception) ne servent
+             qu'au greffon AviSynth, qui n'est pas compilé ni embarqué ici.
+
+VapourSynth R65 (vspipe, libvapoursynth, libvapoursynth-script, module Python)
+  Licence  : LGPL-2.1-or-later
+  Source   : https://github.com/vapoursynth/vapoursynth (tag R65)
+  Texte    : licenses/LGPL-2.1.txt
+
+tsMuxeR
+  Licence  : Apache-2.0 (seul l'outil en ligne de commande est embarqué, pas
+             l'interface graphique liée à Qt)
+  Source   : https://github.com/teaching-droid/tsMuxer
+  Texte    : licenses/Apache-2.0.txt
+
+
+2. Copiés depuis la machine de compilation (paquets de la distribution)
+-----------------------------------------------------------------------
+
+x264                    GPL-2.0-or-later          https://code.videolan.org/videolan/x264
+FFmpeg (ffmpeg)         GPL-2.0-or-later dans les versions des distributions, compilées
+                        avec --enable-gpl (libx264…) ; LGPL-2.1-or-later sinon
+                        https://ffmpeg.org
+MKVToolNix              GPL-2.0                   https://mkvtoolnix.download
+  (mkvmerge, mkvextract)
+fzf                     MIT                       https://github.com/junegunn/fzf
+                        Copyright (c) 2013-2026 Junegunn Choi — licenses/MIT-fzf.txt
+Python (interpréteur    PSF-2.0                   https://www.python.org
+  et bibliothèque
+  standard)
+zimg (via VapourSynth)  WTFPL                     https://github.com/sekrit-twc/zimg
+
+Bibliothèques partagées tirées par ces programmes (libbluray, libdvdread, libdvdnav,
+OpenSSL, libffi, zlib, expat, freetype, etc.) : licences et versions exactes relevées
+automatiquement par build.sh dans usr/share/licenses/ et SOURCES.txt.
+
+
+3. Facultatifs : embarqués seulement s'ils sont installés lors de la compilation
+--------------------------------------------------------------------------------
+
+libaacs                 LGPL-2.1-or-later         https://code.videolan.org/videolan/libaacs
+libbdplus               LGPL-2.1-or-later         https://code.videolan.org/videolan/libbdplus
+libdvdcss               GPL-2.0-or-later          https://code.videolan.org/videolan/libdvdcss
+cyanrip                 LGPL-2.1-or-later         https://github.com/cyanreg/cyanrip
+  dont libcdio-paranoia GPL-3.0-or-later          https://github.com/rocky/libcdio-paranoia
+  dont libmusicbrainz5  LGPL-2.1-or-later         https://musicbrainz.org/doc/libmusicbrainz
+  dont libcurl          curl (licence de type MIT) https://curl.se
+sacd_extract            GPL-2.0-or-later          https://github.com/sacd-ripper/sacd-ripper
+WavPack                 BSD-3-Clause              https://www.wavpack.com
+
+Textes GPL-2.0 et LGPL-2.1 : licenses/GPL-2.0.txt, licenses/LGPL-2.1.txt.
+Texte GPL-3.0 : LICENSE.
+
+
+4. Utilisés mais non distribués
+-------------------------------
+
+MakeMKV (makemkvcon)    makemkv-oss : LGPL-2.1 ; makemkv-bin : propriétaire.
+                        Jamais embarqué : encbd appelle la copie installée sur la machine.
+Outils système          udisksctl, findmnt, blkid, udevadm, systemd-inhibit, kde-inhibit,
+                        gnome-session-inhibit : ceux de la machine.
+
+
+5. Services en ligne interrogés
+-------------------------------
+
+TheDiscDB               https://thediscdb.com — données communautaires
+TMDb                    https://www.themoviedb.org — « This product uses the TMDB API
+                        but is not endorsed or certified by TMDB. »
+MusicBrainz,            https://musicbrainz.org, https://coverartarchive.org (via cyanrip)
+  Cover Art Archive
+AccurateRip             sommes de contrôle des CD (via cyanrip)

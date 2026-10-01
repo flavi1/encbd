@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # Tests d'intégration d'encbd.sh sur de faux disques (sans lecteur, sans MakeMKV réel).
 # Usage : tests/run_tests.sh      Prérequis : bash, python3, ffmpeg (avec libx264).
 set -uo pipefail

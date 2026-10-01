@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # Faux x264 : lit du y4m sur stdin, encode avec la libx264 de ffmpeg.
 preset=medium crf=23 out=""
 while [[ $# -gt 0 ]]; do

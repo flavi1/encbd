@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 """Tests unitaires de lib/encbd-helper.py : python3 -m unittest discover -s tests"""
 import importlib.util
 import json

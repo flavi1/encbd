@@ -173,11 +173,13 @@ L'éjection et l'enchaînement de plusieurs disques ne font pas partie d'encbd :
 | `encbd.appimage --run CMD …` | lance une commande dans l'environnement de l'AppImage |
 | `encbd.appimage --python …` | Python embarqué |
 | `encbd.appimage --shell` | shell dans l'environnement de l'AppImage |
+| `encbd.appimage --licenses` | composants embarqués, leurs licences et les paquets d'origine |
 
 ## Compilation
 
 ```bash
-git submodule update --init --recursive
+./build.sh --init-sources   # enregistre et récupère les sous-modules (VapourSynth épinglé sur R65)
+git commit -m "Sous-modules"
 ./build.sh --check     # liste les prérequis manquants, avec la commande d'installation
 ./build.sh             # compile VapourSynth R65, tsMuxeR, mvc-source, puis encbd.appimage
 ```
@@ -202,6 +204,15 @@ Les tests n'ont besoin ni de lecteur ni de MakeMKV : de faux outils (`tests/shim
 | `lib/encbd-common.sh` | configuration, anti-veille, sélections fzf, filtres de pistes, codes de sortie |
 | `lib/encbd-helper.py` | analyses : playlists MPLS, TheDiscDB, TMDb, sorties MakeMKV et mkvmerge |
 | `build.sh` | compilation des dépendances et génération de l'AppImage |
+| `LICENSE`, `THIRD_PARTY_LICENSES`, `licenses/` | licence d'encbd, composants tiers et textes de leurs licences |
+
+## Licence
+
+encbd est un logiciel libre distribué sous **GPL-3.0-or-later** (voir `LICENSE`). Chaque script porte l'en-tête `SPDX-License-Identifier: GPL-3.0-or-later`.
+
+L'AppImage réunit aussi des composants tiers, chacun sous sa propre licence : x264, FFmpeg et MKVToolNix (GPL-2.0), VapourSynth (LGPL-2.1), tsMuxeR (Apache-2.0), edge264-mvc et mvc-source (BSD-3-Clause), fzf (MIT), etc. La liste complète est dans `THIRD_PARTY_LICENSES`.
+
+À l'assemblage, `build.sh` copie dans l'AppImage (`usr/share/licenses/`) les textes de licence des sous-modules et des paquets dont proviennent les fichiers embarqués. Il écrit aussi `SOURCES.txt`, qui associe chaque fichier à son paquet et sa version, ou au commit du sous-module. Un fichier dont le paquet est introuvable est signalé : complétez sa licence et l'adresse de sa source avant de distribuer l'AppImage. Si vous distribuez l'AppImage, vous devez pouvoir fournir le code source correspondant de ses composants GPL.
 
 ## Mentions
 

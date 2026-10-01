@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # encbd-common.sh — fonctions partagées par encbd.sh et encbd3d.sh.
 # Ce fichier est « sourcé » ; il ne s'exécute pas seul.
 

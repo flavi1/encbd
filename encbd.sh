@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Flavien Guillon
 # encbd.sh — transforme un disque en fichiers nommés :
 #   Blu-ray 2D, DVD   → MKV encodé (x264 ou VAAPI)
 #   Blu-ray 3D (MVC)  → MKV côte à côte / haut-bas, via encbd3d.sh
