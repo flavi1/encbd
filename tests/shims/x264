@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Faux x264 : lit du y4m sur stdin, encode avec la libx264 de ffmpeg.
+preset=medium crf=23 out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --preset) preset="$2"; shift 2 ;; --crf) crf="$2"; shift 2 ;; -o) out="$2"; shift 2 ;;
+    --demuxer|--aq-mode|--bframes|--frame-packing|--sar) shift 2 ;; *) shift ;;
+  esac
+done
+exec ffmpeg -hide_banner -loglevel error -nostdin -f yuv4mpegpipe -i - -c:v libx264 -preset "$preset" -crf "$crf" -f h264 -y "$out"

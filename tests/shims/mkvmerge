@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Faux mkvmerge (sous-ensemble utilisé par encbd.sh) bâti sur ffprobe/ffmpeg."""
+import json, subprocess, sys
+a = sys.argv[1:]
+if a and a[0] == "-J":
+    p = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_streams", "-of", "json", a[1]]))
+    kinds = {"video": "video", "audio": "audio", "subtitle": "subtitles"}
+    ids = {"h264": "V_MPEG4/ISO/AVC", "ac3": "A_AC3", "subrip": "S_TEXT/UTF8"}
+    tracks = []
+    for s in p["streams"]:
+        props = {"codec_id": ids.get(s["codec_name"], s["codec_name"]), "language": s.get("tags", {}).get("language", "und")}
+        if s["codec_type"] == "audio":
+            props["audio_channels"] = s["channels"]
+        if s["codec_type"] == "video":
+            props["default_duration"] = 40000000
+            props["display_dimensions"] = "%dx%d" % (s["width"], s["height"])
+            props["pixel_dimensions"] = props["display_dimensions"]
+        tracks.append({"id": s["index"], "type": kinds.get(s["codec_type"], "other"), "codec": s["codec_name"], "properties": props})
+    print(json.dumps({"tracks": tracks}))
+    sys.exit(0)
+out, files, opts, cur = None, [], [], {}
+i = 0
+while i < len(a):
+    x = a[i]
+    if x == "-o": out = a[i + 1]; i += 2; continue
+    if x in ("--title", "--track-name", "--language", "--default-track", "--default-duration", "--display-dimensions",
+             "--audio-tracks", "--subtitle-tracks"):
+        cur[x] = a[i + 1]; i += 2; continue
+    if x.startswith("--"):
+        cur[x] = True; i += 1; continue
+    files.append((x, cur)); cur = {}; i += 1
+cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+for f, _ in files:
+    if f.endswith(".264"): cmd += ["-r", "25", "-f", "h264"]
+    cmd += ["-i", f]
+maps = []
+for n, (f, o) in enumerate(files):
+    if not o.get("--no-video"): maps += ["-map", "%d:v?" % n]
+    if o.get("--audio-tracks"): maps += sum((["-map", "%d:%s" % (n, t)] for t in o["--audio-tracks"].split(",")), [])
+    if o.get("--subtitle-tracks"): maps += sum((["-map", "%d:%s" % (n, t)] for t in o["--subtitle-tracks"].split(",")), [])
+cmd += maps + ["-c", "copy", out]
+sys.exit(subprocess.call(cmd))

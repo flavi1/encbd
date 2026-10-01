@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Faux makemkvcon pour les tests. FAKE_MAKEMKV_MODE : ok | expired | uhdfail
+set -u
+mode="${FAKE_MAKEMKV_MODE:-ok}"
+args=("$@"); cmd=""; i=0
+for a in "$@"; do case "$a" in info|mkv) cmd="$a"; break ;; esac; i=$((i+1)); done
+echo 'MSG:1005,0,1,"MakeMKV v1.17.7 linux(x64-release) started","%1 started","MakeMKV v1.17.7"'
+if [[ "$mode" == expired ]]; then
+  echo 'MSG:5021,260,1,"This application version is too old.  Please download the latest version at http://www.makemkv.com/ or enter a registration key to continue using the current version.","",""'
+  exit 1
+fi
+if [[ "$mode" == uhdfail ]]; then
+  echo 'MSG:5010,0,0,"Failed to open disc","Failed to open disc"'
+  exit 1
+fi
+case "$cmd" in
+  info)
+    cat <<'R'
+TCOUNT:2
+TINFO:0,2,0,"Bonus"
+TINFO:0,9,0,"0:45:00"
+TINFO:0,11,0,"3000000000"
+TINFO:0,16,0,"00900.mpls"
+TINFO:1,2,0,"Film"
+TINFO:1,9,0,"1:50:00"
+TINFO:1,11,0,"1000000000"
+TINFO:1,16,0,"00800.mpls"
+R
+    ;;
+  mkv)
+    out="${args[$((i+3))]}"
+    echo "PRGV:0,0,65536"
+    ffmpeg -hide_banner -loglevel error -nostdin \
+      -f lavfi -i testsrc=size=320x240:rate=25:duration=4 \
+      -f lavfi -i sine=frequency=440:duration=4 \
+      -f lavfi -i "sine=frequency=220:duration=4" \
+      -i "$(dirname "$0")/sub.srt" \
+      -filter_complex "[2:a]pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0[a6]" \
+      -map 0:v -map 1:a -map "[a6]" -map 3:s \
+      -c:v libx264 -preset ultrafast -c:a ac3 -c:s srt \
+      -metadata:s:a:0 language=fre -metadata:s:a:1 language=eng -metadata:s:s:0 language=fre \
+      "$out/Film_t01.mkv" || exit 1
+    echo "PRGV:65536,65536,65536"
+    ;;
+esac
+exit 0
