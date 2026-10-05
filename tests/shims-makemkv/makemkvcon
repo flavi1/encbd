@@ -11,6 +11,17 @@ if [[ "$mode" == expired ]]; then
   echo 'MSG:5021,260,1,"This application version is too old.  Please download the latest version at http://www.makemkv.com/ or enter a registration key to continue using the current version.","",""'
   exit 1
 fi
+if [[ "$mode" == expired-fr ]]; then
+  echo 'MSG:5021,260,1,"Cette version de l'"'"'application est trop ancienne. Veuillez télécharger la dernière version sur http://www.makemkv.com/ ou entrer une clé d'"'"'enregistrement.","",""'
+  exit 1
+fi
+# Premier accès après insertion : erreur SCSI passagère contenant « KEY », puis succès.
+if [[ "$mode" == transient && ! -e "${FAKE_STATE:?}" ]]; then
+  : > "$FAKE_STATE"
+  echo 'MSG:2003,0,3,"Error '"'"'Scsi error - ILLEGAL REQUEST:COPY PROTECTION KEY EXCHANGE FAILURE - KEY NOT ESTABLISHED'"'"' occurred while reading '"'"'/BDMV/index.bdmv'"'"'","",""'
+  echo 'MSG:5010,0,0,"Failed to open disc","Failed to open disc"'
+  exit 1
+fi
 if [[ "$mode" == uhdfail ]]; then
   echo 'MSG:5010,0,0,"Failed to open disc","Failed to open disc"'
   exit 1

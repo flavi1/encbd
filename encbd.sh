@@ -419,34 +419,96 @@ makemkv_key_hint() {
 }
 
 # Arrête le script si le journal makemkvcon signale un problème de clé ou de lecture.
-check_makemkv_log() {   # <journal> <code makemkvcon>
-  local log="$1" rc="$2" msgs
-  msgs="$(grep '^MSG:' "$log" 2>/dev/null || true)"
-  if grep -qiE 'expired|too old|registration|evaluation period|invalid.*key|key.*invalid|beta key' <<<"$msgs"; then
-    die_code "$EXIT_DECRYPT" "MakeMKV : clé absente ou expirée. $(makemkv_key_hint) Journal : $log"
+# Classe un journal makemkvcon (-r) dans MAKEMKV_DIAG : ok | key | open | fail.
+# MAKEMKV_REASON reçoit le message MakeMKV en cause, pour l'afficher tel quel.
+# La clé n'est mise en cause que par des messages de licence précis (code 5021 « version
+# trop ancienne » de la clé bêta, ou formulations explicites, en anglais et en français).
+# Les erreurs SCSI passagères du lecteur (« KEY EXCHANGE FAILURE – KEY NOT ESTABLISHED »
+# au premier accès après insertion) contiennent aussi « key » : elles ne comptent pas.
+MAKEMKV_REASON=""; MAKEMKV_DIAG=""
+makemkv_diagnose() {   # <journal> <code makemkvcon>
+  local log="$1" rc="$2" msgs line
+  MAKEMKV_REASON=""; MAKEMKV_DIAG=ok
+  msgs="$(grep '^MSG:' "$log" 2>/dev/null | grep -viE 'scsi error' || true)"
+  line="$(grep -E '^MSG:5021,' <<<"$msgs" | head -n1 || true)"
+  if [[ -z "$line" ]]; then
+    line="$(grep -iE 'too old|trop ancienne|registration key|clé d.enregistrement|evaluation period (has )?expired|période d.évaluation.*(expir|termin)|key (has )?expired|clé.*expir|beta key|clé bêta' <<<"$msgs" | head -n1 || true)"
   fi
-  if [[ "$rc" -ne 0 ]] || grep -qiE 'failed to open disc|can.t open|no disc' <<<"$msgs"; then
-    if [[ "$DISC_TYPE" == "uhd" ]]; then
-      die_code "$EXIT_UNSUPPORTED" "MakeMKV ne parvient pas à lire ce disque UHD (lecteur compatible LibreDrive requis). Journal : $log"
-    fi
-    if grep -qiE 'failed to open disc|can.t open|no disc' <<<"$msgs"; then
-      die_code "$EXIT_SOURCE" "MakeMKV ne parvient pas à ouvrir le disque. Journal : $log"
-    fi
+  if [[ -n "$line" ]]; then MAKEMKV_REASON="$(makemkv_msg_text "$line")"; MAKEMKV_DIAG=key; return; fi
+
+  line="$(grep -iE 'failed to open disc|can.t open|no disc|impossible d.ouvrir|pas de disque|aucun disque' <<<"$msgs" | head -n1 || true)"
+  if [[ -n "$line" ]]; then MAKEMKV_REASON="$(makemkv_msg_text "$line")"; MAKEMKV_DIAG=open; return; fi
+
+  if [[ "$rc" -ne 0 ]]; then
+    MAKEMKV_REASON="$(grep '^MSG:' "$log" 2>/dev/null | tail -n1 | { IFS= read -r l || true; makemkv_msg_text "$l"; })"
+    MAKEMKV_DIAG=fail
   fi
 }
 
+# Texte lisible d'une ligne « MSG:code,flags,n,"texte",... ».
+makemkv_msg_text() {   # <ligne>
+  sed -E 's/^MSG:[0-9]+,[0-9]+,[0-9]+,"([^"]*)".*/\1/' <<<"$1"
+}
+
+# Arrête le script selon le diagnostic (rip, ou analyse après le dernier essai).
+makemkv_die() {   # <diagnostic> <journal>
+  local diag="$1" log="$2" why=""
+  if [[ -n "$MAKEMKV_REASON" ]]; then why=" Message de MakeMKV : « $MAKEMKV_REASON »."; fi
+  case "$diag" in
+    key) die_code "$EXIT_DECRYPT" "MakeMKV : clé absente ou expirée.$why $(makemkv_key_hint) Journal : $log" ;;
+    open|fail)
+      if [[ "$DISC_TYPE" == "uhd" ]]; then
+        die_code "$EXIT_UNSUPPORTED" "MakeMKV ne parvient pas à lire ce disque UHD (lecteur compatible LibreDrive requis).$why Journal : $log"
+      fi
+      if [[ "$diag" == open ]]; then die_code "$EXIT_SOURCE" "MakeMKV ne parvient pas à ouvrir le disque.$why Journal : $log"; fi
+      die_code "$EXIT_RIP" "makemkvcon a échoué.$why Journal : $log" ;;
+  esac
+}
+
+check_makemkv_log() {   # <journal> <code makemkvcon>
+  makemkv_diagnose "$1" "$2"
+  if [[ "$MAKEMKV_DIAG" != ok ]]; then makemkv_die "$MAKEMKV_DIAG" "$1"; fi
+}
+
+# Analyse du disque, avec un second essai : juste après l'insertion, le lecteur n'a pas
+# toujours fini de démarrer ni d'établir l'authentification avec le disque.
 makemkv_list_titles() {
-  local log="$RUN_TMP/makemkv-info.log" rc=0
-  msg_step "Analyse du disque avec MakeMKV (jusqu'à une minute)..."
-  makemkvcon_run -r --minlength="$MIN_SECONDS" info "$MAKEMKV_SRC" >"$log" 2>&1 || rc=$?
-  check_makemkv_log "$log" "$rc"
-  TITLES="$(helper makemkv-titles "$log" || true)"
-  if [[ -z "$TITLES" ]]; then
-    if [[ "$DISC_TYPE" == "uhd" ]]; then
-      die_code "$EXIT_UNSUPPORTED" "MakeMKV ne liste aucun titre sur ce disque UHD. Journal : $log"
+  local log rc diag attempt
+  for attempt in 1 2; do
+    log="$RUN_TMP/makemkv-info.$attempt.log"
+    rc=0
+    if [[ "$attempt" -eq 1 ]]; then
+      msg_step "Analyse du disque avec MakeMKV (jusqu'à une minute)..."
     fi
-    die_code "$EXIT_UNSUPPORTED" "MakeMKV ne trouve aucun titre d'au moins $MIN_PLAYLIST_MINUTES min (MIN_PLAYLIST_MINUTES). Journal : $log"
+    makemkvcon_run -r --minlength="$MIN_SECONDS" info "$MAKEMKV_SRC" >"$log" 2>&1 || rc=$?
+    makemkv_diagnose "$log" "$rc"
+    diag="$MAKEMKV_DIAG"
+    TITLES=""
+    if [[ "$diag" == ok ]]; then TITLES="$(helper makemkv-titles "$log" || true)"; fi
+    if [[ "$diag" == ok && -n "$TITLES" ]]; then
+      if [[ "$attempt" -eq 2 ]]; then keep_transient_log "$RUN_TMP/makemkv-info.1.log"; fi
+      return 0
+    fi
+    if [[ "$attempt" -eq 1 ]]; then
+      local what="aucun titre listé"
+      [[ "$diag" != ok ]] && what="${MAKEMKV_REASON:-échec ($diag)}"
+      msg_warn "Analyse MakeMKV en échec ($what) : nouvel essai dans ${MAKEMKV_RETRY_DELAY:-10} s."
+      sleep "${MAKEMKV_RETRY_DELAY:-10}"
+    fi
+  done
+  if [[ "$diag" != ok ]]; then makemkv_die "$diag" "$log"; fi
+  if [[ "$DISC_TYPE" == "uhd" ]]; then
+    die_code "$EXIT_UNSUPPORTED" "MakeMKV ne liste aucun titre sur ce disque UHD. Journal : $log"
   fi
+  die_code "$EXIT_UNSUPPORTED" "MakeMKV ne trouve aucun titre d'au moins $MIN_PLAYLIST_MINUTES min (MIN_PLAYLIST_MINUTES). Journal : $log"
+}
+
+# Conserve le journal d'un échec passager (le dossier de session est effacé en cas de succès).
+keep_transient_log() {   # <journal>
+  local dest
+  dest="${XDG_CACHE_HOME:-$HOME/.cache}/encbd/makemkv-premier-essai-$(date +%Y%m%d-%H%M%S).log"
+  cp -f -- "$1" "$dest" 2>/dev/null || return 0
+  msg_info "Second essai réussi. Journal du premier essai conservé : $dest"
 }
 
 # ─── Liste des titres sans MakeMKV ───────────────────────────────────────────

@@ -9,6 +9,7 @@ ROOT="$(dirname "$HERE")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+export MAKEMKV_RETRY_DELAY=0
 export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" XDG_CACHE_HOME="$TMP/home/.cache"
 mkdir -p "$XDG_CONFIG_HOME"
 BASE_PATH="$HERE/shims:/usr/local/bin:/usr/bin:/bin"
@@ -76,7 +77,15 @@ FAKE_MAKEMKV_MODE=uhdfail run "$HERE/shims-makemkv:$BASE_PATH" --dry-run --silen
 check "UHD illisible par MakeMKV : échec propre (code 4)" 4 "$RC" "$OUT" "LibreDrive"
 
 FAKE_MAKEMKV_MODE=expired run "$HERE/shims-makemkv:$BASE_PATH" --dry-run --silent --no-online "$TMP/AVATAR_FR" "$DEST"
-check "Clé MakeMKV expirée : code 5" 5 "$RC" "$OUT" "clé absente ou expirée" "settings.conf"
+check "Clé MakeMKV expirée : code 5, message de MakeMKV cité" 5 "$RC" "$OUT" "clé absente ou expirée" "settings.conf" "too old" "nouvel essai"
+
+FAKE_MAKEMKV_MODE=expired-fr run "$HERE/shims-makemkv:$BASE_PATH" --dry-run --silent --no-online "$TMP/AVATAR_FR" "$DEST"
+check "Clé MakeMKV expirée, MakeMKV en français : code 5" 5 "$RC" "$OUT" "clé absente ou expirée" "trop ancienne"
+
+FAKE_STATE="$TMP/transient.state" FAKE_MAKEMKV_MODE=transient run "$HERE/shims-makemkv:$BASE_PATH" --dry-run --silent --no-online "$TMP/AVATAR_FR" "$DEST"
+check "Erreur SCSI « KEY EXCHANGE » passagère : pas prise pour une clé, second essai réussi" 0 "$RC" "$OUT" \
+  "nouvel essai" "Second essai réussi" "Moteur de rip    : makemkv"
+if [[ "$OUT" == *"clé absente"* ]]; then ko "Erreur SCSI passagère prise pour un problème de clé" "$OUT"; fi
 
 run "$BASE_PATH" --silent "$TMP/nexistepas" "$DEST"
 check "Source introuvable : code 3" 3 "$RC" "$OUT"
@@ -130,6 +139,27 @@ if [[ "$RC" -eq 0 && -s "$DEST/Mon film.tab.mkv" && "$args" == *"--output-stem $
 else
   ko "3D : délégation (code $RC) args=[$args]" "$OUT"
 fi
+
+echo "== CD audio (fonction run_cd, faux cyanrip)"
+mkdir -p "$TMP/cd-shims" "$TMP/Musique"
+cat > "$TMP/cd-shims/cyanrip" <<'S'
+#!/usr/bin/env bash
+# FAKE_CYANRIP=refuse : sort avec 0 sans rien extraire (comme « Offset is unset! »)
+echo "args: $*"
+[[ "${FAKE_CYANRIP:-ok}" == refuse ]] && { echo "Offset is unset! To continue with an offset of 0, run with -s 0!"; exit 0; }
+mkdir -p "Artiste/Album"; : > "Artiste/Album/01 - Titre.flac"
+S
+chmod +x "$TMP/cd-shims/cyanrip"
+runcd() { OUT="$(PATH="$TMP/cd-shims:$BASE_PATH" bash -c '
+  source "$1"; shift; CONFIG_FILE="$1"; shift; encbd_load_config
+  SILENT=true; DRY_RUN=false; DEVICE=/dev/sr0; DEST_ARG="$1"; CD_READ_OFFSET="$2"; INHIBIT_SLEEP=false
+  setup_run_tmp; run_cd' _ "$ROOT/encbd.sh" "$CONF" "$TMP/Musique" "$1" 2>&1)"; RC=$?; }
+runcd ""
+check "CD en --silent sans décalage configuré : arrêt explicite (code 2)" 2 "$RC" "$OUT" "CD_READ_OFFSET" "cyanrip -f"
+FAKE_CYANRIP=refuse runcd "+124"
+check "CD : cyanrip qui n'extrait rien n'est plus pris pour un succès (code 7)" 7 "$RC" "$OUT" "Échec de l'extraction du CD"
+runcd "+124"
+check "CD : décalage +124 transmis à cyanrip (-s 124), FLAC produit" 0 "$RC" "$OUT" "-s 124" "Terminé"
 
 echo "== SACD (image ISO factice)"
 python3 -c "

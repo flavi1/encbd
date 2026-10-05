@@ -147,7 +147,7 @@ Le fichier `~/.config/encbd.conf` est partagé par `encbd.sh` et `encbd3d.sh`. I
 | `SACD_CHANNELS` | `stereo` | `stereo`, `multi` ou `both` |
 | `FLAC_LEVEL` | `8` | compression FLAC (SACD) |
 
-**Décalage de lecture du CD** : il est propre à chaque modèle de lecteur. Pour le mesurer, insérez un CD connu d'AccurateRip, lancez `./encbd.appimage --run cyanrip -f -d /dev/sr0`, puis reportez la valeur dans `CD_READ_OFFSET`.
+**Décalage de lecture du CD** : il est propre à chaque modèle de lecteur, et cyanrip refuse d'extraire sans lui. Pour le mesurer, insérez un CD connu d'AccurateRip et lancez `./encbd.appimage --run cyanrip -f -d /dev/sr0`, puis reportez la valeur dans `~/.config/encbd.conf`, par exemple `CD_READ_OFFSET="124"` (cyanrip n'a pas de fichier de configuration propre). En mode interactif, encbd propose de faire la mesure et de l'enregistrer ; en `--silent`, il s'arrête avec le code 2 tant que la valeur manque. `CD_READ_OFFSET="0"` désactive la correction.
 
 **SACD et « sans perte »** : le SACD stocke du DSD. `flac` le convertit en PCM 24 bits / 88,2 kHz, ce qui est fidèle mais pas identique bit à bit. `dsf` et `wavpack` conservent le DSD tel quel.
 
