@@ -13,11 +13,14 @@ import datetime
 import json
 import os
 import re
+import struct
 import sys
+import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 
-USER_AGENT = "encbd/1.0 (+https://github.com/)"
+USER_AGENT = "encbd/1.0 ( https://github.com/flavi1/encbd )"
 NET_TIMEOUT = 8
 DISCDB_ORIGIN = "https://thediscdb.com"
 
@@ -69,8 +72,39 @@ JUNK_TOKENS = {
 }
 
 
+# Noms génériques que l'éditeur ou le logiciel de gravure laissent à la place du titre
+# (« LOGICAL_VOLUME_ID », « Blu-ray », « DVD_VIDEO »…) : jamais retenus comme titre.
+PLACEHOLDERS = {
+    "logicalvolumeid", "volumeid", "volume", "newvolume", "volumelabel", "label", "nolabel",
+    "bluray", "bluraydisc", "blurayvideo", "bluray3d", "bd", "bdrom", "bdre", "bdr", "bdvideo", "bdmv",
+    "bdmvroot", "dvd", "dvdvideo", "dvdrom", "dvdr", "dvdvolume", "videots", "cdrom", "cd", "audiocd",
+    "cdaudio", "disc", "disk", "untitled", "notitle", "title", "unknown", "movie", "film", "video",
+    "mainmovie", "feature", "main", "sanstitre", "default",
+}
+
+
+def placeholder_key(name):
+    s = unicodedata.normalize("NFKD", name or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def is_placeholder(name):
+    """Vrai si le nom ne désigne pas un contenu (générique, numéro, identifiant)."""
+    k = placeholder_key(name)
+    if len(k) < 2 or k in PLACEHOLDERS:
+        return True
+    if re.fullmatch(r"\d+", k):                                     # « 20091216 »
+        return True
+    if re.fullmatch(r"(disc|disk|dvd|bd|cd|volume|title|track|vol|d)\d+", k):
+        return True
+    if re.fullmatch(r"[0-9a-f]{8,}", k) and re.search(r"\d", k):  # identifiant hexadécimal
+        return True
+    return False
+
+
 def clean_label(label):
-    """« AVATAR_3D_FR_DISC1 » → « Avatar »."""
+    """« AVATAR_3D_FR_DISC1 » → « Avatar » ; vide pour un label générique."""
     s = re.sub(r"[_.]+", " ", label or "").strip()
     tokens = s.split()
     is_junk = lambda t: t.upper() in JUNK_TOKENS or re.fullmatch(r"(DISC|DISK|CD|D)\d+", t.upper())
@@ -79,6 +113,8 @@ def clean_label(label):
     while tokens and is_junk(tokens[-1]):
         tokens.pop()
     s = " ".join(tokens)
+    if is_placeholder(s):
+        return ""
     if s and s == s.upper():
         small = {"de", "du", "des", "le", "la", "les", "et", "of", "the", "a", "an", "and", "in", "on"}
         words = s.lower().split()
@@ -95,25 +131,94 @@ def render_name(template, title, year):
     return name
 
 
-def bdmt_title(mount):
+def bdmt_title(mount, langs=("fra", "fre", "eng")):
+    """Titre des métadonnées de l'éditeur (BDMV/META/DL/bdmt_<langue>.xml).
+
+    Langues préférées d'abord, puis toutes les autres ; les noms génériques
+    (« Blu-ray », « LOGICAL_VOLUME_ID »…) sont ignorés."""
+    import html
     meta = join_ci(mount, "BDMV", "META", "DL")
     if not meta:
         return None
     names = listdir_ci(meta)
-    for lang in ("fra", "fre", "eng"):
-        real = names.get("bdmt_%s.xml" % lang)
-        if not real:
-            continue
+    files = [names["bdmt_%s.xml" % l] for l in langs if "bdmt_%s.xml" % l in names]
+    files += sorted(real for low, real in names.items() if re.fullmatch(r"bdmt_\w+\.xml", low) and real not in files)
+    for real in files:
         try:
             with open(os.path.join(meta, real), "r", encoding="utf-8", errors="replace") as f:
                 xml = f.read()
         except OSError:
             continue
-        m = re.search(r"<(?:\w+:)?name>\s*(.*?)\s*</(?:\w+:)?name>", xml, re.S)
-        if m and m.group(1).strip():
-            import html
-            return html.unescape(m.group(1).strip())
+        for m in re.finditer(r"<(?:\w+:)?name>\s*(.*?)\s*</(?:\w+:)?name>", xml, re.S):
+            t = re.sub(r"\s+", " ", html.unescape(m.group(1))).strip()
+            if t and not is_placeholder(t):
+                return t
     return None
+
+
+# ─── Contenu déjà présent ───────────────────────────────────────────────────
+# « Avatar (2009) [3D] [VFF].mkv » correspond à « Avatar (2009) » : les mentions entre
+# crochets, la casse, les accents et l'espacement ne comptent pas. L'année n'est
+# comparée que si les deux noms en ont une.
+YEAR_RE = re.compile(r"\(\s*(\d{4})\s*\)")
+
+
+def name_key(name):
+    s = re.sub(r"\[[^\]]*\]", " ", name or "")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c)).casefold()
+    s = re.sub(r"[\s_]+", " ", s).strip(" -_.")
+    return s
+
+
+def same_name(a, b):
+    ka, kb = name_key(a), name_key(b)
+    if ka == kb:
+        return True
+    ya, yb = YEAR_RE.search(ka), YEAR_RE.search(kb)
+    if bool(ya) != bool(yb):        # une seule année : comparer sans elle
+        strip = lambda k: re.sub(r"\s+", " ", YEAR_RE.sub(" ", k)).strip(" -_.")
+        return strip(ka) == strip(kb)
+    return False
+
+
+def find_existing(base, rel, ext=""):
+    """Chemins sous <base> correspondant à <rel> (composants séparés par « / »),
+    sans tenir compte des mentions entre crochets. <ext> (ex. « .mkv ») s'applique
+    au dernier composant, qui doit alors être un fichier non vide."""
+    parts = [p for p in rel.split("/") if p]
+    if not parts:
+        return []
+    cur = [base]
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        nxt = []
+        for d in cur:
+            try:
+                entries = sorted(os.listdir(d))
+            except OSError:
+                continue
+            for n in entries:
+                p = os.path.join(d, n)
+                if last and ext:
+                    if not n.lower().endswith(ext.lower()) or not os.path.isfile(p) or os.path.getsize(p) == 0:
+                        continue
+                    stem = n[: -len(ext)]
+                elif not os.path.isdir(p):
+                    continue
+                else:
+                    stem = n
+                if same_name(stem, part):
+                    nxt.append(p)
+        cur = nxt
+    return cur
+
+
+def count_audio(path):
+    n = 0
+    for _root, _dirs, files in os.walk(path):
+        n += sum(1 for f in files if f.lower().endswith((".flac", ".wv", ".dsf", ".mp3", ".ogg", ".opus", ".m4a", ".wav")))
+    return n
 
 
 # ─── Blu-ray : playlists MPLS ───────────────────────────────────────────────
@@ -390,6 +495,200 @@ def tmdb_search(query, key, lang):
     return 0 if results else 1
 
 
+# ─── Wikidata (sans clé) ─────────────────────────────────────────────────────
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+# film, film d'animation, long métrage d'animation, film 3D, téléfilm, film à épisodes
+FILM_CLASSES = ("Q11424", "Q202866", "Q29168811", "Q229390", "Q506240", "Q24862", "Q24869")
+
+
+def wikidata_search(query, lang="fr"):
+    """Lignes : titre (langue demandée, sinon anglais), année, identifiant Wikidata."""
+    lang = (lang or "fr").split("-")[0].lower() or "fr"
+    films = "|".join("P31=" + q for q in FILM_CLASSES)
+    try:
+        res = http_json(WIKIDATA_API + "?" + urllib.parse.urlencode({
+            "action": "query", "list": "search", "format": "json", "srlimit": "6",
+            "srsearch": "%s haswbstatement:%s" % (query, films)}))
+        ids = [h["title"] for h in (res.get("query") or {}).get("search") or [] if re.fullmatch(r"Q\d+", h.get("title", ""))]
+        if not ids:
+            return 1
+        ent = http_json(WIKIDATA_API + "?" + urllib.parse.urlencode({
+            "action": "wbgetentities", "format": "json", "ids": "|".join(ids),
+            "props": "labels|claims", "languages": "%s|en" % lang}))
+    except Exception as exc:
+        print("wikidata: %s" % exc, file=sys.stderr)
+        return 1
+    found = 0
+    for qid in ids:
+        e = (ent.get("entities") or {}).get(qid) or {}
+        labels = e.get("labels") or {}
+        title = (labels.get(lang) or labels.get("en") or {}).get("value")
+        if not title:
+            continue
+        years = []
+        for c in (e.get("claims") or {}).get("P577") or []:
+            t = ((((c.get("mainsnak") or {}).get("datavalue") or {}).get("value")) or {}).get("time", "")
+            m = re.match(r"[+-](\d{4})", t)
+            if m:
+                years.append(m.group(1))
+        out(title, min(years) if years else "", qid)
+        found += 1
+    return 0 if found else 1
+
+
+# ─── CD audio : identifiant de disque MusicBrainz ───────────────────────────
+CDROMREADTOCHDR = 0x5305
+CDROMREADTOCENTRY = 0x5306
+CDROM_LBA = 0x01
+CDROM_LEADOUT = 0xAA
+
+
+def read_toc(device):
+    """Table des matières : (premier, dernier, [(piste, lba, données?)…], lba de fin)."""
+    import fcntl
+    fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        first, last = struct.unpack("BB", fcntl.ioctl(fd, CDROMREADTOCHDR, bytes(2)))
+        tracks = []
+        for t in list(range(first, last + 1)) + [CDROM_LEADOUT]:
+            buf = struct.pack("BBBxiB3x", t, 0, CDROM_LBA, 0, 0)
+            r = fcntl.ioctl(fd, CDROMREADTOCENTRY, buf)
+            _trk, adr_ctrl, _fmt, lba, _mode = struct.unpack("BBBxiB3x", r)
+            tracks.append((t, lba, bool((adr_ctrl >> 4) & 0x04)))
+    finally:
+        os.close(fd)
+    leadout = tracks.pop()[1]
+    return first, last, tracks, leadout
+
+
+def audio_toc(first, last, tracks, leadout):
+    """TOC MusicBrainz (décalages + 150) : (premier, dernier audio, fin, [décalages])."""
+    audio = [t for t in tracks if not t[2]]
+    if not audio:
+        return None
+    last_audio = audio[-1][0]
+    after = [t for t in tracks if t[0] > last_audio]
+    if after:                     # CD enrichi : la session de données suit
+        end = after[0][1] - 11400 + 150
+    else:
+        end = leadout + 150
+    return first, last_audio, end, [t[1] + 150 for t in audio if t[0] >= first]
+
+
+def disc_id(first, last, leadout, offsets):
+    import base64
+    import hashlib
+    data = "%02X%02X%08X" % (first, last, leadout)
+    padded = list(offsets) + [0] * (99 - len(offsets))
+    data += "".join("%08X" % o for o in padded[:99])
+    digest = hashlib.sha1(data.encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii").translate(str.maketrans("+/=", "._-"))
+
+
+def artist_credit(ac):
+    return "".join((c.get("name") or (c.get("artist") or {}).get("name") or "") + (c.get("joinphrase") or "") for c in ac or [])
+
+
+def musicbrainz_releases(did, toc):
+    """Éditions MusicBrainz du disque (identifiant exact, puis TOC approchée)."""
+    first, last, end, offsets = toc
+    params = {"inc": "artist-credits+recordings", "fmt": "json", "cdstubs": "no",
+              "toc": " ".join(str(x) for x in [first, last, end] + offsets)}
+    url = "https://musicbrainz.org/ws/2/discid/%s?%s" % (did, urllib.parse.urlencode(params))
+    try:
+        res = http_json(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return []
+        raise
+    rels = res.get("releases") or []
+    lines = []
+    for r in rels:
+        tracks = 0
+        disc = ""
+        media = r.get("media") or []
+        for m in media:
+            ids = [d.get("id") for d in m.get("discs") or []]
+            if did in ids or (not tracks and len(m.get("tracks") or []) == len(offsets)):
+                tracks = len(m.get("tracks") or []) or m.get("track-count") or 0
+                disc = str(m.get("position") or "")
+                if did in ids:
+                    break
+        lines.append({
+            "release": r.get("id", ""),
+            "artist": artist_credit(r.get("artist-credit")),
+            "album": r.get("title", ""),
+            "year": (r.get("date") or "")[:4],
+            "country": r.get("country") or "",
+            "comment": r.get("disambiguation") or "",
+            "tracks": tracks or len(offsets),
+            "disc": disc,
+            "discs": len(media),
+        })
+    return lines
+
+
+def cd_identify(device, online=True):
+    """Ligne « disc » puis une ligne par édition : identifiant, artiste, album, année,
+    pays, commentaire, pistes, disque, disques."""
+    try:
+        toc = audio_toc(*read_toc(device))
+    except OSError as exc:
+        print("toc: %s" % exc, file=sys.stderr)
+        return 1
+    if not toc:
+        return 1
+    did = disc_id(toc[0], toc[1], toc[2], toc[3])
+    out("disc", did, len(toc[3]))
+    if not online:
+        return 0
+    try:
+        rels = musicbrainz_releases(did, toc)
+    except Exception as exc:
+        print("musicbrainz: %s" % exc, file=sys.stderr)
+        return 0
+    for r in rels:
+        out("release", r["release"], r["artist"], r["album"], r["year"], r["country"], r["comment"], r["tracks"], r["disc"], r["discs"])
+    return 0
+
+
+def render_music(template, values):
+    """Modèle cyanrip ({album_artist}/{album}…) → chemin, ou None si le modèle
+    utilise une variable ou une condition inconnue (cyanrip le rendra lui-même)."""
+    if "{if" in template:
+        return None
+    unknown = []
+
+    def sub(m):
+        k = m.group(1)
+        if k not in values:
+            unknown.append(k)
+            return ""
+        v = str(values[k] or "")
+        v = v.replace("/", "-").replace("{", "(").replace("}", ")")
+        return re.sub(r"[\x00-\x1f]", "", v)
+
+    rendered = re.sub(r"\{([a-z_]+)\}", sub, template)
+    if unknown:
+        return None
+    parts = [re.sub(r"\s{2,}", " ", p).strip(" .") for p in rendered.split("/")]
+    if any(not p for p in parts):
+        return None
+    return "/".join(parts)
+
+
+def json_object(pairs):
+    """« clé=valeur » … → objet JSON ; « clé:=json » pour une valeur déjà JSON."""
+    obj = {}
+    for p in pairs:
+        k, v = p.split("=", 1)
+        if k.endswith(":"):
+            obj[k[:-1]] = json.loads(v)
+        else:
+            obj[k] = v
+    return json.dumps(obj, ensure_ascii=False)
+
+
 # ─── SACD ────────────────────────────────────────────────────────────────────
 def is_sacd_iso(path):
     """Une image SACD porte « SACDMTOC » au secteur 510."""
@@ -447,6 +746,34 @@ def main(argv):
         return discdb_lookup(args[0], args[1])
     if cmd == "tmdb":
         return tmdb_search(args[0], args[1], args[2] if len(args) > 2 else "fr-FR")
+    if cmd == "is-placeholder":
+        return 0 if is_placeholder(args[0] if args else "") else 1
+    if cmd == "find-existing":
+        found = find_existing(args[0], args[1], args[2] if len(args) > 2 else "")
+        for f in found:
+            out(f)
+        return 0 if found else 1
+    if cmd == "same-name":
+        return 0 if same_name(args[0], args[1]) else 1
+    if cmd == "count-audio":
+        out(count_audio(args[0]))
+        return 0
+    if cmd == "wikidata":
+        return wikidata_search(args[0], args[1] if len(args) > 1 else "fr")
+    if cmd == "cd-identify":
+        return cd_identify(args[0], not (len(args) > 1 and args[1] == "offline"))
+    if cmd == "render-music":
+        vals = dict(a.split("=", 1) for a in args[1:])
+        r = render_music(args[0], vals)
+        if r:
+            out(r)
+        return 0 if r else 1
+    if cmd == "json-list":
+        print(json.dumps([l for l in (args[0] if args else "").split("\n") if l], ensure_ascii=False))
+        return 0
+    if cmd == "json":
+        print(json_object(args))
+        return 0
     if cmd == "is-sacd-iso":
         return 0 if is_sacd_iso(args[0]) else 1
     print("sous-commande inconnue : %s" % cmd, file=sys.stderr)

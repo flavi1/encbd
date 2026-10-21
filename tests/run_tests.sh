@@ -87,6 +87,22 @@ check "Erreur SCSI « KEY EXCHANGE » passagère : pas prise pour une clé, seco
   "nouvel essai" "Second essai réussi" "Moteur de rip    : makemkv"
 if [[ "$OUT" == *"clé absente"* ]]; then ko "Erreur SCSI passagère prise pour un problème de clé" "$OUT"; fi
 
+echo "== Noms génériques, contenu déjà présent, --identify"
+mkdisc "$TMP/LOGICAL_VOLUME_ID" "label_xml='Blu-ray'"
+run "$BASE_PATH" --dry-run --silent --no-online "$TMP/LOGICAL_VOLUME_ID" "$DEST"
+check "Label « LOGICAL_VOLUME_ID » et bdmt « Blu-ray » écartés" 0 "$RC" "$OUT" "Nom              : Sans titre  [défaut]"
+mkdir -p "$DEST/annotes"; echo x > "$DEST/annotes/avatar [VFF] [1080p].mkv"
+run "$BASE_PATH" --identify --no-online "$TMP/AVATAR_FR" "$DEST/annotes"
+check "--identify : nom, fichier prévu, copie annotée [..] reconnue" 0 "$RC" "$OUT" \
+  "Nom           : Avatar  [label du volume (AVATAR_FR)]" "Fichier       : $DEST/annotes/Avatar.mkv" \
+  "Existant      : $DEST/annotes/avatar [VFF] [1080p].mkv"
+JSON="$(PATH="$BASE_PATH" bash "$ROOT/encbd.sh" --config "$CONF" --identify --json --no-online "$TMP/AVATAR_FR" "$DEST/annotes" 2>/dev/null)"
+if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["title"]=="Avatar" and d["exists"] is True and d["kind"]=="bluray" and d["existing"][0].endswith("[1080p].mkv")' "$JSON"; then
+  ok "--identify --json : JSON seul sur stdout"
+else ko "--identify --json" "$JSON"; fi
+run "$HERE/shims-makemkv:$BASE_PATH" --silent --no-online "$TMP/AVATAR_FR" "$DEST/annotes"
+check "Copie annotée déjà présente : aucun traitement (code 0)" 0 "$RC" "$OUT" "existe déjà" "avatar [VFF] [1080p].mkv"
+
 run "$BASE_PATH" --silent "$TMP/nexistepas" "$DEST"
 check "Source introuvable : code 3" 3 "$RC" "$OUT"
 
@@ -160,6 +176,28 @@ FAKE_CYANRIP=refuse runcd "+124"
 check "CD : cyanrip qui n'extrait rien n'est plus pris pour un succès (code 7)" 7 "$RC" "$OUT" "Échec de l'extraction du CD"
 runcd "+124"
 check "CD : décalage +124 transmis à cyanrip (-s 124), FLAC produit" 0 "$RC" "$OUT" "-s 124" "Terminé"
+
+# Édition MusicBrainz choisie par encbd : -R <identifiant> et dossier rendu transmis à cyanrip.
+runcdmb() { OUT="$(PATH="$TMP/cd-shims:$BASE_PATH" bash -c '
+  source "$1"; shift; CONFIG_FILE="$1"; shift; encbd_load_config
+  helper() { if [[ "$1" == cd-identify ]]; then
+      printf "disc\tDISCID-TEST\t2\n"
+      printf "release\tmbid-1\tArtiste X\tAlbum: Y\t1999\tFR\t\t1\t1\t1\n"
+      printf "release\tmbid-2\tArtiste X\tAlbum: Y\t2005\tUS\tremaster\t1\t1\t1\n"
+    else "$ENCBD_PYTHON" "$ENCBD_LIB_DIR/encbd-helper.py" "$@"; fi; }
+  SILENT=true; DRY_RUN=false; DEVICE=/dev/sr0; DEST_ARG="$1"; CD_READ_OFFSET=0; INHIBIT_SLEEP=false
+  IDENTIFY="$2"; FORCED_RELEASE="$3"; DISC_TYPE=cd
+  setup_run_tmp; run_cd' _ "$ROOT/encbd.sh" "$CONF" "$TMP/Musique2" "$@" 2>&1)"; RC=$?; }
+mkdir -p "$TMP/Musique2"
+runcdmb false ""
+check "CD : 1re édition MusicBrainz imposée à cyanrip, dossier décidé par encbd" 0 "$RC" "$OUT" \
+  "-R mbid-1" "-D Artiste X/Album: Y "
+runcdmb true "mbid-2"
+check "CD --identify --release : édition imposée, dossier prévu" 0 "$RC" "$OUT" \
+  "Album         : Artiste X — Album: Y (2005)  [option --release]" "Dossier       : $TMP/Musique2/Artiste X/Album: Y"
+mkdir -p "$TMP/Musique2/artiste x/Album: Y [FLAC]"; : > "$TMP/Musique2/artiste x/Album: Y [FLAC]/01.flac"
+runcdmb false ""
+check "CD : album déjà présent sous un nom annoté : rien à faire" 0 "$RC" "$OUT" "L'album existe déjà" "Album: Y [FLAC]"
 
 echo "== SACD (image ISO factice)"
 python3 -c "
