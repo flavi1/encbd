@@ -139,3 +139,98 @@ class Parsers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Identification(unittest.TestCase):
+    def test_placeholders(self):
+        for name in ("LOGICAL_VOLUME_ID", "Blu-ray", "BLURAY", "DVD_VIDEO", "BDROM", "VIDEO_TS",
+                     "Untitled", "DISC1", "20091216", "Volume 3"[:6], "3F2A9B1C0D"):
+            self.assertTrue(helper.is_placeholder(name), name)
+        for name in ("Avatar", "Le Seigneur des Anneaux", "Blu-ray Bonus Edition", "Se7en"):
+            self.assertFalse(helper.is_placeholder(name), name)
+        self.assertEqual(helper.clean_label("LOGICAL_VOLUME_ID"), "")
+        self.assertEqual(helper.clean_label("DVD_VIDEO"), "")
+
+    def test_bdmt_skips_placeholders_and_reads_all_languages(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta = os.path.join(root, "BDMV", "META", "DL")
+            os.makedirs(meta)
+            xml = '<disclib><di:discinfo><di:title><di:name>%s</di:name></di:title></di:discinfo></disclib>'
+            with open(os.path.join(meta, "bdmt_eng.xml"), "w") as f:
+                f.write(xml % "Blu-ray")
+            self.assertIsNone(helper.bdmt_title(root))
+            with open(os.path.join(meta, "bdmt_deu.xml"), "w") as f:
+                f.write(xml % "Das Boot")
+            self.assertEqual(helper.bdmt_title(root), "Das Boot")
+            with open(os.path.join(meta, "bdmt_fra.xml"), "w") as f:
+                f.write(xml % "Le Bateau")
+            self.assertEqual(helper.bdmt_title(root), "Le Bateau")
+
+    def test_same_name_ignores_bracket_tags(self):
+        self.assertTrue(helper.same_name("Avatar (2009) [3D] [VFF]", "avatar (2009)"))
+        self.assertTrue(helper.same_name("Avatar [Director's cut]", "Avatar (2009)"))
+        self.assertTrue(helper.same_name("Amélie", "AMELIE"))
+        self.assertFalse(helper.same_name("Dune (1984)", "Dune (2021)"))
+        self.assertFalse(helper.same_name("Alien", "Aliens"))
+
+    def test_find_existing(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "AC-DC [FLAC]", "Back in Black [Remaster]"))
+            with open(os.path.join(root, "Avatar (2009) [VFF].mkv"), "w") as f:
+                f.write("x")
+            open(os.path.join(root, "Vide.mkv"), "w").close()
+            self.assertEqual(helper.find_existing(root, "Avatar (2009)", ".mkv"), [os.path.join(root, "Avatar (2009) [VFF].mkv")])
+            self.assertEqual(helper.find_existing(root, "Vide", ".mkv"), [])
+            self.assertEqual(helper.find_existing(root, "AC-DC/Back in Black"),
+                             [os.path.join(root, "AC-DC [FLAC]", "Back in Black [Remaster]")])
+
+    def test_disc_id(self):
+        # Exemple de la documentation MusicBrainz (« Disc ID Calculation »)
+        self.assertEqual(helper.disc_id(1, 6, 95462, [150, 15363, 32314, 46592, 63414, 80489]),
+                         "49HHV7Eb8UKF3aQiNmu1GR8vKTY-")
+
+    def test_audio_toc_enhanced_cd(self):
+        tracks = [(1, 0, False), (2, 15000, False), (3, 125824, True)]
+        self.assertEqual(helper.audio_toc(1, 3, tracks, 200000), (1, 2, 125824 - 11400 + 150, [150, 15150]))
+        self.assertEqual(helper.audio_toc(1, 2, tracks[:2], 30000), (1, 2, 30150, [150, 15150]))
+
+    def test_musicbrainz_releases(self):
+        sample = {"releases": [{
+            "id": "rel-1", "title": "Album", "date": "1999-03-01", "country": "FR", "disambiguation": "",
+            "artist-credit": [{"name": "A", "joinphrase": " & "}, {"name": "B", "joinphrase": ""}],
+            "media": [{"position": 1, "discs": [{"id": "OTHER"}], "tracks": [{}] * 3},
+                      {"position": 2, "discs": [{"id": "DID"}], "tracks": [{}] * 2}]}]}
+        orig = helper.http_json
+        helper.http_json = lambda url, *a, **k: sample
+        try:
+            rels = helper.musicbrainz_releases("DID", (1, 2, 30150, [150, 15150]))
+        finally:
+            helper.http_json = orig
+        self.assertEqual(rels[0]["artist"], "A & B")
+        self.assertEqual((rels[0]["year"], rels[0]["tracks"], rels[0]["disc"]), ("1999", 2, "2"))
+
+    def test_render_music(self):
+        v = {"album_artist": "AC/DC", "album": "Back in Black", "year": "1980"}
+        self.assertEqual(helper.render_music("{album_artist}/{album} ({year})", v), "AC-DC/Back in Black (1980)")
+        self.assertIsNone(helper.render_music("{album}{if #disc# > #1# (|disc|)}", v))
+        self.assertIsNone(helper.render_music("{album} {barcode}", v))
+
+    def test_wikidata(self):
+        search = {"query": {"search": [{"title": "Q24871"}, {"title": "Q1"}]}}
+        ents = {"entities": {
+            "Q24871": {"labels": {"fr": {"value": "Avatar"}}, "claims": {"P577": [
+                {"mainsnak": {"datavalue": {"value": {"time": "+2009-12-16T00:00:00Z"}}}},
+                {"mainsnak": {"datavalue": {"value": {"time": "+2009-12-10T00:00:00Z"}}}}]}},
+            "Q1": {"labels": {}}}}
+        orig = helper.http_json
+        helper.http_json = lambda url, *a, **k: search if "list=search" in url else ents
+        import io
+        import contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = helper.wikidata_search("Avatar", "fr-FR")
+        finally:
+            helper.http_json = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue(), "Avatar\t2009\tQ24871\n")

@@ -29,9 +29,11 @@ encbd.appimage [options] <source> <destination>
 | --- | --- |
 | `-s`, `--silent` | aucune question ; chaque choix suit une règle fixe (voir plus bas) |
 | `--dry-run` | affiche la détection et le plan, sans rien écrire |
+| `--identify [--json]` | identifie le disque et le nom prévu, sans rien extraire ni demander ; destination facultative. `--json` : un objet JSON sur la sortie standard, pour d'autres programmes |
 | `--title "NOM"`, `--year AAAA` | impose le nom et l'année |
 | `--playlist N` | impose le titre : playlist (`800`, `00800.mpls`), titre MakeMKV ou titre DVD |
-| `--no-online` | ni TheDiscDB, ni TMDb, ni MusicBrainz |
+| `--release MBID` | CD audio : impose l'édition MusicBrainz |
+| `--no-online` | ni TheDiscDB, ni TMDb, ni Wikidata, ni MusicBrainz |
 | `--rip-backend auto\|makemkv\|libaacs` | force le moteur de déchiffrement |
 | `--lang fra,eng` | pistes audio et sous-titres à garder |
 | `--max-channels N` | canaux audio maximum (2 = stéréo, 0 = sans limite) |
@@ -54,6 +56,9 @@ Exemples :
 # CD audio
 ./encbd.appimage /dev/sr0 ~/Musique
 
+# Nom prévu et présence d'une copie, sans rien extraire (JSON pour un autre programme)
+./encbd.appimage --identify --json /dev/sr0 ~/Vidéos
+
 # encbd3d.sh directement, sur un dossier BDMV déjà déchiffré
 ./encbd.appimage 3d ~/rips/AVATAR
 ```
@@ -75,10 +80,16 @@ Les sources sont essayées dans cet ordre :
 
 1. `--title` ;
 2. TheDiscDB, une base communautaire qui reconnaît le disque par une empreinte de ses fichiers ;
-3. le titre de l'éditeur (`BDMV/META/DL/bdmt_fra.xml`) ;
+3. le titre de l'éditeur (`BDMV/META/DL/bdmt_*.xml`, français et anglais d'abord, puis les autres langues) ;
 4. le label du volume, nettoyé (`AVATAR_3D_FR` donne « Avatar ») ;
-5. TMDb, si une clé est configurée, pour le titre localisé et l'année ;
+5. TMDb, si une clé est configurée, puis Wikidata (sans clé), pour le titre localisé et l'année ;
 6. la saisie manuelle (proposée pré-remplie en mode interactif).
+
+Les noms génériques laissés par l'éditeur ou le logiciel de gravure (« LOGICAL_VOLUME_ID », « Blu-ray », « DVD_VIDEO », « BDROM », numéros…) sont écartés aux étapes 3 et 4 : sans autre source, le film s'appelle « Sans titre » et la saisie manuelle le signale.
+
+**CD audio** : encbd calcule l'identifiant MusicBrainz du disque depuis sa table des matières, choisit l'édition (unique, choisie dans une liste, ou `--release`), rend lui-même le dossier d'album (`MUSIC_DIR_TEMPLATE`) et impose édition et dossier à cyanrip : le nom annoncé est celui produit.
+
+**Contenu déjà présent** : avant tout traitement, encbd cherche dans la destination un fichier (ou un dossier d'album complet) du même nom, sans tenir compte de la casse, des accents ni des mentions entre crochets : `Avatar (2009) [3D] [VFF].mkv` compte pour `Avatar (2009)`. S'il en trouve un, il s'arrête sans rien faire.
 
 **Titre principal** : celui désigné par TheDiscDB, ce qui déjoue les playlists leurres. À défaut, c'est le plus long d'au moins `MIN_PLAYLIST_MINUTES` minutes.
 
@@ -86,12 +97,12 @@ Les sources sont essayées dans cet ordre :
 
 | Choix | Règle |
 | --- | --- |
-| Nom | première source disponible ; TMDb seulement si le résultat est unique ou identique |
+| Nom | première source disponible ; TMDb seulement si le résultat est unique ou identique, Wikidata seulement s'il est identique |
 | Titre principal | TheDiscDB, sinon le plus long |
 | Pistes | toutes, filtrées par `--lang` et `AUDIO_MAX_CHANNELS` |
 | Réglages | ceux de `encbd.conf` et de la ligne de commande |
 | Blu-ray 3D sans MakeMKV | encodage en 2D, avec le message `ATTENTION : LE DISQUE EST EN 3D MAIS MAKEMKVCON EST INTROUVABLE. IL SERA ENCODÉ EN 2D !` |
-| CD sans correspondance MusicBrainz unique | première édition, sinon « Artiste inconnu / Album inconnu » |
+| CD avec plusieurs éditions MusicBrainz | la première ; sans aucune, « Artiste inconnu / Album inconnu » |
 | SACD | toujours WavPack (DSD sans perte), quel que soit `SACD_FORMAT` |
 
 ## Ce qu'il faut sur la machine
@@ -129,9 +140,9 @@ Le fichier `~/.config/encbd.conf` est partagé par `encbd.sh` et `encbd3d.sh`. I
 | `MAKEMKVCON_BIN` | vide | chemin de makemkvcon (vide = recherche dans le PATH) |
 | `MAKEMKV_SELECTION` | `+sel:all` | règle de sélection des pistes imposée à MakeMKV ; vide = celle de `settings.conf` |
 | `NAME_TEMPLATE` | `{title} ({year})` | nom du fichier ; un `()` vide est retiré |
-| `ONLINE_LOOKUP` | `true` | TheDiscDB, TMDb, MusicBrainz |
+| `ONLINE_LOOKUP` | `true` | TheDiscDB, TMDb, Wikidata, MusicBrainz |
 | `TMDB_API_KEY` | vide | clé TMDb personnelle (v3 ou jeton v4) ; vide = TMDb ignoré |
-| `TMDB_LANGUAGE` | `fr-FR` | langue des titres TMDb |
+| `TMDB_LANGUAGE` | `fr-FR` | langue des titres TMDb et Wikidata |
 | `STEREO_LAYOUT`, `SBS_MODE` | `tab`, `half` | 3D |
 | `ENCODER` | `x264` | `x264` ou `vaapi` |
 | `X264_PRESET`, `X264_CRF`, `X264_EXTRA_OPTS` | `slow`, `22`, `--aq-mode 3 --bframes 6` | x264 |
@@ -207,7 +218,7 @@ Les tests n'ont besoin ni de lecteur ni de MakeMKV : de faux outils (`tests/shim
 | `encbd.sh` | orchestrateur : sonde, identification, rip, aiguillage |
 | `encbd3d.sh` | Blu-ray 3D : tsMuxeR, mvc-source (VapourSynth), assemblage SBS/TAB, encodage |
 | `lib/encbd-common.sh` | configuration, anti-veille, sélections fzf, filtres de pistes, codes de sortie |
-| `lib/encbd-helper.py` | analyses : playlists MPLS, TheDiscDB, TMDb, sorties MakeMKV et mkvmerge |
+| `lib/encbd-helper.py` | analyses : playlists MPLS, TheDiscDB, TMDb, Wikidata, identifiant de CD MusicBrainz, noms déjà présents, sorties MakeMKV et mkvmerge |
 | `build.sh` | compilation des dépendances et génération de l'AppImage |
 | `LICENSE`, `THIRD_PARTY_LICENSES`, `licenses/` | licence d'encbd, composants tiers et textes de leurs licences |
 
@@ -222,5 +233,6 @@ L'AppImage réunit aussi des composants tiers, chacun sous sa propre licence : x
 ## Mentions
 
 - Données de films : TheDiscDB et TMDb. *This product uses the TMDB API but is not endorsed or certified by TMDB.* L'API TMDb est gratuite pour un usage non commercial ; chaque utilisateur crée sa propre clé.
-- Métadonnées musicales : MusicBrainz et Cover Art Archive, via cyanrip.
+- Données de films : Wikidata (CC0).
+- Métadonnées musicales : MusicBrainz (identification du disque par encbd, étiquettes par cyanrip) et Cover Art Archive, via cyanrip.
 - En France, la loi DADVSI encadre le contournement des mesures techniques de protection, y compris pour la copie privée. Vous êtes responsable de l'usage que vous faites de cet outil.

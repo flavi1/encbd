@@ -27,7 +27,8 @@ helper() { "$ENCBD_PYTHON" "$ENCBD_LIB_DIR/encbd-helper.py" "$@"; }
 # ─── État ────────────────────────────────────────────────────────────────────
 SOURCE_ARG=""; DEST_ARG=""
 DRY_RUN=false
-FORCED_TITLE=""; FORCED_YEAR=""; FORCED_PLAYLIST=""
+FORCED_TITLE=""; FORCED_YEAR=""; FORCED_PLAYLIST=""; FORCED_RELEASE=""
+IDENTIFY=false; IDENTIFY_JSON=false
 WORKDIR_ROOT=""
 
 SRC_KIND=""          # device | iso | dir | sacd-net
@@ -51,6 +52,11 @@ MAIN_IDX=""; MAIN_SECS=0; MAIN_BYTES=0; MAIN_SOURCE=""; MAIN_ORIGIN=""
 
 NAME_TITLE=""; NAME_YEAR=""; NAME_ORIGIN=""; DISCDB_MAIN=""
 DEST_IS_DIR=false; DEST_DIR=""; BASE_NAME=""; FINAL_PATH=""
+EXISTING=""          # contenu déjà présent (un chemin par ligne)
+
+# CD audio : édition MusicBrainz retenue
+CD_DISCID=""; CD_RELEASE=""; CD_ARTIST=""; CD_ALBUM=""; CD_YEAR=""; CD_TRACKS=0
+CD_RELEASES=0; CD_ORIGIN=""; CD_DIR=""
 WORKDIR=""; RIPPED_MKV=""
 RUN_TMP=""
 
@@ -60,6 +66,7 @@ WARN_3D_MSG="ATTENTION : LE DISQUE EST EN 3D MAIS MAKEMKVCON EST INTROUVABLE. IL
 usage() {
   cat <<EOF
 Usage : $(basename "$0") [options] <source> <destination>
+        $(basename "$0") --identify [--json] <source> [<destination>]
 
 Source       : lecteur (/dev/sr0), image .iso, dossier contenant BDMV/ ou VIDEO_TS/,
                ou serveur sacd_extract (IP:PORT) pour un SACD.
@@ -72,7 +79,10 @@ Options générales :
   --title "NOM"           Impose le nom (pas de résolution)      --year AAAA : impose l'année
   --playlist N            Impose le titre : playlist Blu-ray (800, 00800.mpls),
                           numéro de titre MakeMKV ou titre DVD
-  --no-online             Ni TheDiscDB, ni TMDb (MusicBrainz désactivé pour les CD)
+  --release MBID          CD audio : impose l'édition MusicBrainz (identifiant)
+  --no-online             Ni TheDiscDB, ni TMDb, ni Wikidata (ni MusicBrainz pour les CD)
+  --identify              Identifie le disque et le nom prévu, sans rien extraire
+                          (implique --silent) ; --json : résultat en JSON sur stdout
   --rip-backend auto|makemkv|libaacs
   --config FICHIER        Configuration (défaut : $CONFIG_FILE)
   --workdir DOSSIER       Où créer le dossier de travail (défaut : à côté du résultat)
@@ -103,6 +113,9 @@ parse_args() {
       --title) need_arg "$1" $#; FORCED_TITLE="$2"; shift 2 ;;
       --year) need_arg "$1" $#; FORCED_YEAR="$2"; shift 2 ;;
       --playlist) need_arg "$1" $#; FORCED_PLAYLIST="$2"; shift 2 ;;
+      --release) need_arg "$1" $#; FORCED_RELEASE="$2"; shift 2 ;;
+      --identify) IDENTIFY=true; DRY_RUN=true; SILENT="true"; shift ;;
+      --json) IDENTIFY_JSON=true; shift ;;
       --no-online) CLI_OVERRIDES+=("ONLINE_LOOKUP=false"); shift ;;
       --rip-backend) need_arg "$1" $#; CLI_OVERRIDES+=("RIP_BACKEND=$2"); shift 2 ;;
       --config) need_arg "$1" $#; CONFIG_FILE="$2"; shift 2 ;;
@@ -126,6 +139,8 @@ parse_args() {
       *) positional+=("$1"); shift ;;
     esac
   done
+  if [[ "$IDENTIFY_JSON" == true && "$IDENTIFY" != true ]]; then die_code "$EXIT_USAGE" "--json s'utilise avec --identify"; fi
+  if [[ "$IDENTIFY" == true && ${#positional[@]} -eq 1 ]]; then positional+=(""); fi
   if [[ ${#positional[@]} -ne 2 ]]; then usage >&2; exit "$EXIT_USAGE"; fi
   SOURCE_ARG="${positional[0]}"
   DEST_ARG="${positional[1]}"
@@ -333,7 +348,7 @@ choose_backend() {
     *) die_code "$EXIT_USAGE" "RIP_BACKEND : auto, makemkv ou libaacs attendu (reçu '$RIP_BACKEND')" ;;
   esac
 
-  if [[ "$DISC_TYPE" == "uhd" && "$BACKEND" == "libaacs" ]]; then
+  if [[ "$DISC_TYPE" == "uhd" && "$BACKEND" == "libaacs" && "$IDENTIFY" != true ]]; then
     die_code "$EXIT_UNSUPPORTED" "Disque UHD : libaacs ne gère pas AACS 2.0. Installez MakeMKV (lecteur compatible LibreDrive requis)."
   fi
 
@@ -568,23 +583,25 @@ identify_name() {
     fi
   fi
 
-  # 2. Métadonnées de l'éditeur (bdmt_*.xml)
+  # 2. Métadonnées de l'éditeur (bdmt_*.xml, toutes langues ; noms génériques ignorés)
   if [[ -z "$NAME_TITLE" && -n "$MOUNT_DIR" ]]; then
     t="$(helper bdmt "$MOUNT_DIR" 2>/dev/null || true)"
     if [[ -n "$t" ]]; then NAME_TITLE="$t"; NAME_ORIGIN="métadonnées du disque (bdmt)"; fi
   fi
 
-  # 3. Label du volume, nettoyé
+  # 3. Label du volume, nettoyé (« LOGICAL_VOLUME_ID », « DVD_VIDEO »… écartés)
   if [[ -z "$NAME_TITLE" ]]; then
     t="$(helper clean-label "$DISC_LABEL" 2>/dev/null || true)"
     if [[ -n "$t" ]]; then NAME_TITLE="$t"; NAME_ORIGIN="label du volume ($DISC_LABEL)"; fi
   fi
-  if [[ -z "$NAME_TITLE" ]]; then NAME_TITLE="Sans titre"; NAME_ORIGIN="défaut"; fi
 
-  # 4. TMDb : titre localisé et année
-  if is_online && [[ -n "$TMDB_API_KEY" && "$NAME_ORIGIN" != "TheDiscDB" ]]; then
-    tmdb_refine
+  # 4. Bases en ligne : titre localisé et année (TMDb si une clé est configurée, puis Wikidata)
+  if [[ -n "$NAME_TITLE" ]] && is_online && [[ "$NAME_ORIGIN" != "TheDiscDB" ]]; then
+    local before="$NAME_ORIGIN"
+    if [[ -n "$TMDB_API_KEY" ]]; then online_refine tmdb; fi
+    if [[ "$NAME_ORIGIN" == "$before" ]]; then online_refine wikidata; fi
   fi
+  if [[ -z "$NAME_TITLE" ]]; then NAME_TITLE="Sans titre"; NAME_ORIGIN="défaut"; fi
 
   # 5. Saisie manuelle
   if ! is_silent && [[ "$DRY_RUN" != true ]]; then
@@ -596,23 +613,31 @@ identify_name() {
   if [[ -n "$FORCED_YEAR" ]]; then NAME_YEAR="$FORCED_YEAR"; fi
 }
 
-tmdb_refine() {
-  local results count line t y pick choices=() exact=""
-  results="$(helper tmdb "$NAME_TITLE" "$TMDB_API_KEY" "$TMDB_LANGUAGE" 2>/dev/null || true)"
+# Affine NAME_TITLE / NAME_YEAR avec une base en ligne (tmdb | wikidata).
+online_refine() {   # <base>
+  local base="$1" results count line t y pick choices=() exact="" source attribution=""
+  case "$base" in
+    tmdb) source="TMDb"; attribution="$(tmdb_attribution)"
+          results="$(helper tmdb "$NAME_TITLE" "$TMDB_API_KEY" "$TMDB_LANGUAGE" 2>/dev/null || true)" ;;
+    wikidata) source="Wikidata"; attribution="    (données Wikidata, CC0)"
+          results="$(helper wikidata "$NAME_TITLE" "$TMDB_LANGUAGE" 2>/dev/null || true)" ;;
+  esac
   if [[ -z "$results" ]]; then return 0; fi
   count="$(wc -l <<<"$results")"
 
   if is_silent || [[ "$DRY_RUN" == true ]]; then
+    # Sans question : seulement un titre identique (casse et mentions [..] ignorées),
+    # ou un résultat unique pour TMDb (Wikidata cherche aussi dans les descriptions).
     while IFS=$'\t' read -r t y _; do
-      if [[ "${t,,}" == "${NAME_TITLE,,}" ]]; then exact="$t"$'\t'"$y"; break; fi
+      if helper same-name "$t" "$NAME_TITLE"; then exact="$t"$'\t'"$y"; break; fi
     done <<<"$results"
     if [[ -n "$exact" ]]; then line="$exact"
-    elif [[ "$count" -eq 1 ]]; then line="$results"
+    elif [[ "$count" -eq 1 && "$base" == tmdb ]]; then line="$results"
     else return 0
     fi
     IFS=$'\t' read -r t y _ <<<"$line"
-    NAME_TITLE="$t"; NAME_YEAR="$y"; NAME_ORIGIN="$NAME_ORIGIN + TMDb"
-    tmdb_attribution
+    NAME_TITLE="$t"; NAME_YEAR="$y"; NAME_ORIGIN="$NAME_ORIGIN + $source"
+    echo "$attribution"
     return 0
   fi
 
@@ -620,15 +645,15 @@ tmdb_refine() {
     choices+=("$t${y:+ ($y)}"$'\t'"$t"$'\t'"$y")
   done <<<"$results"
   pick="$(printf '%s\n' "(garder « $NAME_TITLE »)"$'\t'"$NAME_TITLE"$'\t'"$NAME_YEAR" "${choices[@]}" \
-    | "$FZF_BIN" --delimiter=$'\t' --with-nth=1 --header="Film correspondant (TMDb)" \
+    | "$FZF_BIN" --delimiter=$'\t' --with-nth=1 --header="Film correspondant ($source)" \
         --height='~40%' --border --layout=reverse || true)"
   if [[ -n "$pick" ]]; then
     IFS=$'\t' read -r _ t y <<<"$pick"
     if [[ "$t" != "$NAME_TITLE" || "$y" != "$NAME_YEAR" ]]; then
-      NAME_TITLE="$t"; NAME_YEAR="$y"; NAME_ORIGIN="$NAME_ORIGIN + TMDb"
+      NAME_TITLE="$t"; NAME_YEAR="$y"; NAME_ORIGIN="$NAME_ORIGIN + $source"
     fi
   fi
-  tmdb_attribution
+  echo "$attribution"
 }
 
 # ─── Choix du titre principal ────────────────────────────────────────────────
@@ -716,6 +741,9 @@ compute_destination() {
     else
       FINAL_PATH="$DEST_DIR/$BASE_NAME.mkv"
     fi
+    # Même contenu sous un nom annoté : « Avatar (2009) [3D] [VFF].mkv »
+    local stem; stem="$(basename "$FINAL_PATH")"; stem="${stem%.mkv}"
+    EXISTING="$(helper find-existing "$DEST_DIR" "$stem" .mkv 2>/dev/null || true)"
   else
     DEST_IS_DIR=false
     local parent; parent="$(dirname "$DEST_ARG")"
@@ -724,13 +752,17 @@ compute_destination() {
     DEST_DIR="$(dirname "$FINAL_PATH")"
     BASE_NAME="$(basename "$FINAL_PATH")"
     BASE_NAME="${BASE_NAME%.*}"
+    EXISTING=""
+    if [[ -s "$FINAL_PATH" ]]; then EXISTING="$FINAL_PATH"; fi
   fi
   WORKDIR="${WORKDIR_ROOT:-$DEST_DIR}/$(sanitize_filename "$BASE_NAME").encbd"
 }
 
 exit_if_final_exists() {
-  if [[ -s "$FINAL_PATH" ]]; then
-    echo "✅ [INFO] Le fichier final existe déjà : $FINAL_PATH"
+  local first
+  if [[ -s "$FINAL_PATH" ]]; then first="$FINAL_PATH"; else first="$(head -n1 <<<"$EXISTING")"; fi
+  if [[ -n "$first" ]]; then
+    echo "✅ [INFO] Le contenu existe déjà : $first"
     echo "✅ [INFO] Aucun traitement nécessaire."
     exit 0
   fi
@@ -779,6 +811,7 @@ dry_run_report() {
   printf '%-17s: %s%s  [%s]\n' "Nom" "$NAME_TITLE" "${NAME_YEAR:+ ($NAME_YEAR)}" "$NAME_ORIGIN"
   printf '%-17s: %s — %s, %s  [%s]\n' "Titre principal" "${MAIN_SOURCE:-$MAIN_IDX}" "$(seconds_to_hms "$MAIN_SECS")" "$(gb "$MAIN_BYTES")" "$MAIN_ORIGIN"
   printf '%-17s: %s\n' "Fichier final" "$FINAL_PATH"
+  if [[ -n "$EXISTING" ]]; then printf '%-17s: %s\n' "Existant" "$(head -n1 <<<"$EXISTING")"; fi
   printf '%-17s: %s\n' "Travail" "$WORKDIR"
   printf '%-17s: besoin estimé %s, disponible %s\n' "Espace" "$(gb "$EST_NEED")" "$(gb "$EST_AVAIL")"
   if [[ "$OUTPUT_3D" == true ]]; then
@@ -1004,6 +1037,13 @@ encode_2d() {
 run_video() {
   if ! is_silent && [[ "$DRY_RUN" != true ]]; then require_tool "$FZF_BIN" "sélections interactives (ou --silent)"; fi
   choose_backend
+  if [[ "$IDENTIFY" == true ]]; then
+    # Nom et destination seulement : ni liste des titres (lente avec MakeMKV), ni rip.
+    identify_name
+    if [[ -n "$DEST_ARG" ]]; then compute_destination; fi
+    identify_report
+    return 0
+  fi
   announce_2d_fallback
   list_titles
   identify_name
@@ -1107,12 +1147,67 @@ puis indiquez CD_READ_OFFSET=\"<valeur>\" dans $CONFIG_FILE (CD_READ_OFFSET=\"0\
   fi
 }
 
+# Identifie le CD (identifiant MusicBrainz calculé depuis la TOC) et choisit
+# l'édition ; CD_DIR reçoit le dossier d'album rendu depuis <modèle>, si possible.
+identify_cd() {   # <modèle de dossier>
+  local scheme="$1" r kind id artist album year country comment tracks disc discs
+  local lines=() pick=""
+  CD_ORIGIN=""
+  r="$(helper cd-identify "$DEVICE" "$(is_online && echo online || echo offline)" 2>/dev/null || true)"
+  while IFS=$'\t' read -r kind id artist album year country comment tracks disc discs; do
+    case "$kind" in
+      disc) CD_DISCID="$id"; CD_TRACKS="${artist:-0}" ;;
+      release) lines+=("$id"$'\t'"$artist"$'\t'"$album"$'\t'"$year"$'\t'"$country"$'\t'"$comment"$'\t'"$tracks") ;;
+    esac
+  done <<<"$r"
+  CD_RELEASES=${#lines[@]}
+
+  if [[ -n "$FORCED_RELEASE" ]]; then
+    pick="$(printf '%s\n' "${lines[@]}" | awk -F'\t' -v id="$FORCED_RELEASE" '$1 == id' | head -n1)"
+    if [[ -z "$pick" ]]; then pick="$FORCED_RELEASE"; fi
+    CD_ORIGIN="option --release"
+  elif [[ ${#lines[@]} -eq 1 ]]; then
+    pick="${lines[0]}"; CD_ORIGIN="MusicBrainz"
+  elif [[ ${#lines[@]} -gt 1 ]]; then
+    CD_ORIGIN="MusicBrainz (1re de ${#lines[@]} éditions)"
+    pick="${lines[0]}"
+    if ! is_silent && [[ "$DRY_RUN" != true ]] && command -v "$FZF_BIN" >/dev/null 2>&1; then
+      local p
+      p="$(printf '%s\n' "${lines[@]}" | awk -F'\t' '{ printf "%s\t%s — %s%s%s%s\n", $1, $2, $3, ($4 ? " (" $4 ")" : ""), ($5 ? " [" $5 "]" : ""), ($6 ? " " $6 : "") }' \
+        | "$FZF_BIN" --delimiter=$'\t' --with-nth=2 --header="Édition MusicBrainz" --height='~40%' --border --layout=reverse || true)"
+      if [[ -n "$p" ]]; then
+        pick="$(printf '%s\n' "${lines[@]}" | awk -F'\t' -v id="$(cut -f1 <<<"$p")" '$1 == id' | head -n1)"
+        CD_ORIGIN="MusicBrainz (choix)"
+      fi
+    fi
+  fi
+  if [[ -z "$pick" ]]; then return 0; fi
+  IFS=$'\t' read -r CD_RELEASE CD_ARTIST CD_ALBUM CD_YEAR country comment tracks <<<"$pick"
+  if [[ "${tracks:-0}" =~ ^[0-9]+$ && "${tracks:-0}" -gt 0 ]]; then CD_TRACKS="$tracks"; fi
+  if [[ -n "$CD_ALBUM" ]]; then
+    CD_DIR="$(helper render-music "$scheme" "album_artist=$CD_ARTIST" "artist=$CD_ARTIST" "album=$CD_ALBUM" \
+      "year=$CD_YEAR" "date=$CD_YEAR" "releasecomment=$comment" "format=FLAC" 2>/dev/null || true)"
+  fi
+}
+
+# Dossier d'album déjà présent (mentions [..] ignorées) et complet.
+cd_existing() {   # <dossier racine>
+  local d n
+  while IFS= read -r d; do
+    if [[ -z "$d" ]]; then continue; fi
+    n="$(helper count-audio "$d" 2>/dev/null || echo 0)"
+    if [[ "$n" -ge "${CD_TRACKS:-1}" && "$n" -gt 0 ]]; then printf '%s\n' "$d"; fi
+  done < <(helper find-existing "$1" "$CD_DIR" 2>/dev/null || true)
+}
+
 run_cd() {
   local cyan run_dir dir_scheme log rc=0 base_args=()
   cyan="$(command -v "$CYANRIP_BIN" 2>/dev/null || true)"
-  if [[ -z "$cyan" ]]; then die_code "$EXIT_PREREQ" "cyanrip introuvable : la prise en charge des CD audio est désactivée."; fi
+  if [[ -z "$cyan" && "$IDENTIFY" != true ]]; then die_code "$EXIT_PREREQ" "cyanrip introuvable : la prise en charge des CD audio est désactivée."; fi
 
-  if [[ -d "$DEST_ARG" ]]; then
+  if [[ -z "$DEST_ARG" ]]; then
+    run_dir="$PWD"; dir_scheme="$MUSIC_DIR_TEMPLATE"
+  elif [[ -d "$DEST_ARG" ]]; then
     run_dir="$(realpath "$DEST_ARG")"; dir_scheme="$MUSIC_DIR_TEMPLATE"
   else
     run_dir="$(dirname "$DEST_ARG")"
@@ -1120,19 +1215,40 @@ run_cd() {
     run_dir="$(realpath "$run_dir")"; dir_scheme="$(basename "$DEST_ARG")"
   fi
 
+  identify_cd "$dir_scheme"
+  if [[ -n "$CD_DIR" ]]; then
+    dir_scheme="$CD_DIR"          # nom décidé ici : cyanrip le reçoit tel quel
+    EXISTING="$(cd_existing "$run_dir")"
+  fi
+  if [[ "$IDENTIFY" == true ]]; then
+    CD_DIR="${CD_DIR:+$run_dir/$CD_DIR}"
+    identify_report
+    return 0
+  fi
+
   resolve_cd_offset "$cyan"
   base_args=(-d "$DEVICE" -o flac -D "$dir_scheme" -F "$MUSIC_FILE_TEMPLATE" -s "${CD_READ_OFFSET:-0}")
+  if [[ -n "$CD_RELEASE" ]]; then base_args+=(-R "$CD_RELEASE"); fi
   if ! is_online; then base_args+=(-N -A -U); fi
 
   if [[ "$DRY_RUN" == true ]]; then
     echo
     echo "== encbd : détection (--dry-run, rien n'est écrit) =="
     printf '%-17s: %s\n' "Source" "$DEVICE" "Type" "CD audio" "Destination" "$run_dir/$dir_scheme"
+    if [[ -n "$CD_ALBUM" ]]; then
+      printf '%-17s: %s — %s%s  [%s]\n' "Album" "$CD_ARTIST" "$CD_ALBUM" "${CD_YEAR:+ ($CD_YEAR)}" "$CD_ORIGIN"
+    fi
+    if [[ -n "$EXISTING" ]]; then printf '%-17s: %s\n' "Existant" "$(head -n1 <<<"$EXISTING")"; fi
     printf '%-17s: cyanrip (%s)\n' "Extraction" "$cyan"
     printf '%-17s: %s\n' "Offset lecteur" "${CD_READ_OFFSET:-inconnu}"
     echo
     "$cyan" -I "${base_args[@]}" || true
     return 0
+  fi
+  if [[ -n "$EXISTING" ]]; then
+    echo "✅ [INFO] L'album existe déjà : $(head -n1 <<<"$EXISTING")"
+    echo "✅ [INFO] Aucun traitement nécessaire."
+    exit 0
   fi
 
   if [[ "$INHIBIT_SLEEP" == "true" ]]; then start_inhibit "Extraction du CD audio (encbd)"; fi
@@ -1267,9 +1383,55 @@ run_sacd() {
   echo "🎉 [INFO] Terminé : $count piste(s) dans $out_root"
 }
 
+identify_sacd() {
+  NAME_TITLE="$(helper clean-label "$DISC_LABEL" 2>/dev/null || true)"
+  NAME_ORIGIN="label du volume"
+  identify_report
+}
+
+# ─── --identify ──────────────────────────────────────────────────────────────
+identify_report() {
+  local existing_json kind="$DISC_TYPE"
+  existing_json="$(helper json-list "$EXISTING")"
+  if [[ "$IDENTIFY_JSON" == true ]]; then
+    if [[ "$kind" == cd ]]; then
+      helper json "kind=cd" "type=$(disc_type_label)" "discid=$CD_DISCID" "release=$CD_RELEASE" \
+        "artist=$CD_ARTIST" "album=$CD_ALBUM" "title=$CD_ALBUM" "year=$CD_YEAR" "origin=$CD_ORIGIN" \
+        "tracks:=${CD_TRACKS:-0}" "releases:=${CD_RELEASES:-0}" "dir=$CD_DIR" "final_path=$CD_DIR" \
+        "exists:=$([[ -n "$EXISTING" ]] && echo true || echo false)" "existing:=$existing_json" >&3
+    else
+      helper json "kind=$kind" "type=$(disc_type_label)" "label=$DISC_LABEL" "title=$NAME_TITLE" \
+        "year=$NAME_YEAR" "origin=$NAME_ORIGIN" "three_d:=$([[ "$OUTPUT_3D" == true ]] && echo true || echo false)" \
+        "final_path=$FINAL_PATH" "exists:=$([[ -n "$EXISTING" ]] && echo true || echo false)" \
+        "existing:=$existing_json" >&3
+    fi
+    return 0
+  fi
+  echo
+  echo "== encbd : identification =="
+  printf '%-14s: %s\n' "Type" "$(disc_type_label)"
+  if [[ "$kind" == cd ]]; then
+    printf '%-14s: %s\n' "Disc ID" "${CD_DISCID:-?}"
+    if [[ -n "$CD_ALBUM" ]]; then
+      printf '%-14s: %s — %s%s  [%s]\n' "Album" "$CD_ARTIST" "$CD_ALBUM" "${CD_YEAR:+ ($CD_YEAR)}" "$CD_ORIGIN"
+      printf '%-14s: %s\n' "MusicBrainz" "$CD_RELEASE"
+    else
+      printf '%-14s: %s\n' "Album" "inconnu (aucune édition MusicBrainz)"
+    fi
+    if [[ -n "$CD_DIR" ]]; then printf '%-14s: %s\n' "Dossier" "$CD_DIR"; fi
+  else
+    printf '%-14s: %s\n' "Label" "$DISC_LABEL"
+    printf '%-14s: %s%s  [%s]\n' "Nom" "$NAME_TITLE" "${NAME_YEAR:+ ($NAME_YEAR)}" "$NAME_ORIGIN"
+    if [[ -n "$FINAL_PATH" ]]; then printf '%-14s: %s\n' "Fichier" "$FINAL_PATH"; fi
+  fi
+  if [[ -n "$EXISTING" ]]; then printf '%-14s: %s\n' "Existant" "$(head -n1 <<<"$EXISTING")"; fi
+}
+
 # ─── Programme principal ─────────────────────────────────────────────────────
 main() {
   parse_args "$@"
+  # --identify --json : stdout réservé au JSON (fd 3), messages sur stderr.
+  if [[ "$IDENTIFY_JSON" == true ]]; then exec 3>&1 1>&2; fi
   encbd_load_config
   apply_cli_overrides
   validate_settings
@@ -1283,7 +1445,7 @@ main() {
   msg_info "Disque : $(disc_type_label) — source $SOURCE_PATH"
   case "$DISC_TYPE" in
     cd) run_cd ;;
-    sacd) run_sacd ;;
+    sacd) if [[ "$IDENTIFY" == true ]]; then identify_sacd; else run_sacd; fi ;;
     *) run_video ;;
   esac
 }
